@@ -344,7 +344,6 @@ public:
 	}
 	bool Add(int key)
 	{
-	tryAgain:
 		NODE* prev, * curr;
 
 		prev = &head;
@@ -361,7 +360,7 @@ public:
 		{
 			prev->unlock();
 			curr->unlock();
-			goto tryAgain;
+			return false;
 		}
 
 		if (key == curr->key) {
@@ -380,7 +379,6 @@ public:
 	}
 	bool Remove(int key)
 	{
-	tryAgain:
 		NODE* prev, * curr;
 
 		prev = &head;
@@ -397,14 +395,13 @@ public:
 		{
 			prev->unlock();
 			curr->unlock();
-			goto tryAgain;
+			return false;
 		}
 
 		if (key == curr->key) {
 			prev->next = curr->next;
 			prev->unlock();
 			curr->unlock();
-			delete curr;
 			return true;
 		}
 		else {
@@ -416,7 +413,6 @@ public:
 	}
 	bool Contains(int key)
 	{
-	tryAgain:
 		NODE* prev, * curr;
 
 		prev = &head;
@@ -433,7 +429,7 @@ public:
 		{
 			prev->unlock();
 			curr->unlock();
-			goto tryAgain;
+			return false;
 		}
 
 		if (key == curr->key) {
