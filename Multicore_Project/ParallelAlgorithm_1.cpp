@@ -345,7 +345,7 @@ public:
 	bool Add(int key)
 	{
 		NODE* prev, * curr;
-
+	tryAgain:
 		prev = &head;
 		curr = prev->next;
 		while (curr->key < key) {
@@ -360,7 +360,7 @@ public:
 		{
 			prev->unlock();
 			curr->unlock();
-			return false;
+			goto tryAgain;
 		}
 
 		if (key == curr->key) {
@@ -380,7 +380,7 @@ public:
 	bool Remove(int key)
 	{
 		NODE* prev, * curr;
-
+	tryAgain:
 		prev = &head;
 		curr = prev->next;
 		while (curr->key < key) {
@@ -395,7 +395,7 @@ public:
 		{
 			prev->unlock();
 			curr->unlock();
-			return false;
+			goto tryAgain;
 		}
 
 		if (key == curr->key) {
@@ -415,6 +415,7 @@ public:
 	{
 		NODE* prev, * curr;
 
+	tryAgain:
 		prev = &head;
 		curr = prev->next;
 		while (curr->key < key) {
@@ -429,7 +430,7 @@ public:
 		{
 			prev->unlock();
 			curr->unlock();
-			return false;
+			goto tryAgain;
 		}
 
 		if (key == curr->key) {
