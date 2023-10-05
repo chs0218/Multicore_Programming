@@ -91,6 +91,44 @@ head의 bottlelack 때문에 쓰레드 개수가 일정이상에서 증가해도 빨라지진 않는다.
 			- marking은 잠금을 획득한 수만큼 수행된다.
 	- 순회를 할 때, 대상 노드를 잠글 필요가 없고 노드가 head에서 접근할 수 있는지 확인하기 위해
 		전체리스트를 다시 순회하지 않아도 된다.
+- Blocking 알고리즘이라 Convoying이 일어난다.(한 스레드가 Lock을 얻은채 지연되면 다른 스레드도 같이 지연된다.)
+- Flag 사용시 메모리 업데이트 순서가 중요해 volatile과 atomic_thread_fence를 적절히 사용하거나
+	atomic memory를 사용해야한다.
+- 메모리 Leak을 해결해야한다.
+	- Delete를 사용하면 오동작이 일어난다.
+	- Delete를 하지 않고 모아놓았다가 재사용한다!
+		- 아무도 remove된 node를 가리키지 않을 때
+		- remove 시점에서 중복실행 중인 모든 method의 호출이 종료되었을 때
+	- C++11의 shared_ptr을 사용해 해결해보자
+
+shared_ptr를 사용한 게으른 동기화
+- shard_ptr 객체를 load, store하는 것이 atomic이 아니다.
+	- shared_ptr<SPNODE> curr = prev->next;		// DATA RACE
+- 공유하는 shared_ptr 객체의 load, store를 atomic하게 수행하게 한다.
+	- shared_ptr<SPNODE> curr = atomic_load(&prev->next);
+	- atomic_exchange(&prev->next, new_node);
+- atomic_load와 atomic_exchange는 하나의 lock으로 구현되어 있어 비효율적이다.
+- shared_ptr 각각이 별도의 lock을 갖도록 atomic_shared_ptr를 정의해서 사용해보자
+- atomic_shared_ptr의 access는 느리다.
+	- mutex를 사용하기 때문에 blocking 알고리즘이다.
+	- 세밀한 동기화와 다를 것이 없다.
+	- 효율적인 atomic_shared_ptr이 필요하다!
+		- non-blocking으로 구현!!
+
+Lock-free 알고리즘으로 성능을 향상시키자
+- 여러개의 쓰레드에서 동시에 호출했을 때에도 정해진 단위 시간마다 적어도 
+	한 개의 호출이 완료되는 알고리즘
+- 멀티쓰레드에서 동시에 호출해도 정확한 결과를 만들어주는 알고리즘
+- 호출이 다른 쓰레드와 충돌하더라도 적어도 하나의 승자가 있어 승자는 Delay없이 완료됨
+
+Wait-free 알고리즘은?
+- 호출이 다른 쓰레드와 충돌해도 모두 Delay없이 완료
+
+추가 상식
+- Lock을 사용하지 않는다고 lock-free 알고리즘이 아니다.
+- Lock을 사용하면 무조건 lock-free 알고리즘이 아니다.
+
+
 */
 
 class my_mutex
@@ -107,7 +145,7 @@ public:
 	NODE* volatile next;
 	volatile bool removed;
 	mutex nlock;
-	NODE() { next = NULL; }
+	NODE() { key = 1; next = NULL; removed = false; }
 	NODE(int key_value) {
 		next = NULL;
 		removed = false;
@@ -116,6 +154,135 @@ public:
 	void lock() { nlock.lock(); }
 	void unlock() { nlock.unlock(); }
 	~NODE() {}
+};
+class SPNODE {
+public:
+	int key;
+	shared_ptr<SPNODE> next;
+	volatile bool removed;
+	mutex nlock;
+	SPNODE() { key = 1; next = NULL; removed = false; }
+	SPNODE(int key_value) {
+		next = NULL;
+		removed = false;
+		key = key_value;
+	}
+	void lock() { nlock.lock(); }
+	void unlock() { nlock.unlock(); }
+	~SPNODE() {}
+};
+template<class T>
+struct atomic_shared_ptr {
+private:
+	mutable mutex m_lock;
+	shared_ptr<T> m_ptr;
+public:
+	bool is_lock_free() const noexcept
+	{
+		return false;
+	}
+	void store(shared_ptr<T> sptr, memory_order = memory_order_seq_cst) noexcept
+	{
+		m_lock.lock();
+		m_ptr = sptr;
+		m_lock.unlock();
+	}
+	shared_ptr<T> load(memory_order = memory_order_seq_cst) const noexcept
+	{
+		m_lock.lock();
+		shared_ptr<T> t = m_ptr;
+		m_lock.unlock();
+		return t;
+	}
+	operator shared_ptr<T>() const noexcept
+	{
+		m_lock.lock();
+		shared_ptr<T> t = m_ptr;
+		m_lock.unlock();
+		return t;
+	}
+	shared_ptr<T> exchange(shared_ptr<T> sptr, memory_order = memory_order_seq_cst) noexcept
+	{
+		m_lock.lock();
+		shared_ptr<T> t = m_ptr;
+		m_ptr = sptr;
+		m_lock.unlock();
+		return t;
+	}
+	bool compare_exchange_strong(shared_ptr<T>& expected_sptr, shared_ptr<T> new_sptr, memory_order, memory_order) noexcept
+	{
+		bool success = false;
+		m_lock.lock();
+		shared_ptr<T> t = m_ptr;
+		if (m_ptr.get() == expected_sptr.get()) {
+			m_ptr = new_sptr;
+			success = true;
+		}
+		expected_sptr = m_ptr;
+		m_lock.unlock();
+	}
+	bool compare_exchange_weak(shared_ptr<T>& expected_sptr, shared_ptr<T> new_sptr, memory_order, memory_order) noexcept
+	{
+		return compare_exchange_strong(expected_sptr, new_sptr, memory_order);
+	}
+	atomic_shared_ptr() noexcept = default;
+	constexpr atomic_shared_ptr(shared_ptr<T> sptr) noexcept
+	{
+		m_lock.lock();
+		m_ptr = sptr;
+		m_lock.unlock();
+	}
+	shared_ptr<T> operator=(shared_ptr<T> sptr) noexcept
+	{
+		m_lock.lock();
+		m_ptr = sptr;
+		m_lock.unlock();
+		return sptr;
+	}
+	void reset()
+	{
+		m_lock.lock();
+		m_ptr = nullptr;
+		m_lock.unlock();
+	}
+	atomic_shared_ptr& operator=(const atomic_shared_ptr& rhs)
+	{
+		store(rhs);
+		return *this;
+	}
+	shared_ptr<T>& operator->() {
+		std::lock_guard<mutex> tt(m_lock);
+		return m_ptr;
+	}
+	template<typename TargetType>
+	inline bool operator ==(shared_ptr<TargetType> const& rhs)
+	{
+		return load() == rhs;
+	}
+	template<typename TargetType>
+	inline bool operator ==(atomic_shared_ptr<TargetType> const& rhs)
+	{
+		lock_guard<mutex> t1(m_lock);
+		lock_guard<mutex> t2(rhs.m_lock);
+		return m_ptr == rhs.m_ptr;
+	}
+};
+class ASPNODE {
+	mutex n_lock;
+public:
+	int key;
+	atomic_shared_ptr <ASPNODE> next;
+	volatile bool removed;
+	ASPNODE() : key(-1), next(nullptr), removed(false) {}
+	ASPNODE(int x) : key(x), next(nullptr), removed(false) {}
+	void lock()
+	{
+		n_lock.lock();
+	}
+	void unlock()
+	{
+		n_lock.unlock();
+	}
 };
 
 class CSET {
@@ -501,79 +668,82 @@ public:
 	}
 	bool Add(int key)
 	{
-		NODE* prev, * curr;
-	tryAgain:
-		prev = &head;
-		curr = prev->next;
-		while (curr->key < key) {
-			prev = curr;
-			curr = curr->next;
-		}
-
-		prev->lock();
-		curr->lock();
-
-		if (!Validate(prev, curr))
+		while (true)
 		{
-			prev->unlock();
-			curr->unlock();
-			goto tryAgain;
-		}
+			NODE* prev, * curr;
 
-		if (key == curr->key) {
-			prev->unlock();
-			curr->unlock();
-			return false;
-		}
-		else {
-			NODE* node = new NODE(key);	// 이 또한 빼면 좋다
-			node->next = curr;
-			prev->next = node;
-			prev->unlock();
-			curr->unlock();
-			return true;
+			prev = &head;
+			curr = prev->next;
+			while (curr->key < key) {
+				prev = curr;
+				curr = curr->next;
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+			else {
+				NODE* node = new NODE(key);	// 이 또한 빼면 좋다
+				node->next = curr;
+				prev->next = node;
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
 		}
 	}
 	bool Remove(int key)
 	{
-		NODE* prev, * curr;
-	tryAgain:
-		prev = &head;
-		curr = prev->next;
-		while (curr->key < key) {
-			prev = curr;
-			curr = curr->next;
-		}
-
-		prev->lock();
-		curr->lock();
-
-		if (!Validate(prev, curr))
+		while (true)
 		{
-			prev->unlock();
-			curr->unlock();
-			goto tryAgain;
-		}
+			NODE* prev, * curr;
+			prev = &head;
+			curr = prev->next;
+			while (curr->key < key) {
+				prev = curr;
+				curr = curr->next;
+			}
 
-		if (key == curr->key) {
-			curr->removed = true;
-			prev->next = curr->next;
-			prev->unlock();
-			curr->unlock();
-			//delete curr;
-			return true;
-		}
-		else {
-			prev->unlock();
-			curr->unlock();
-			return false;
-		}
+			prev->lock();
+			curr->lock();
 
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				curr->removed = true;
+				prev->next = curr->next;
+				prev->unlock();
+				curr->unlock();
+				//delete curr;
+				return true;
+			}
+			else {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+		}
 	}
 	bool Contains(int key)
 	{
 		NODE* curr;
-	tryAgain:
 		curr = head.next;
 		while (curr->key < key) {
 			curr = curr->next;
@@ -596,11 +766,371 @@ public:
 		cout << endl;
 	}
 };
+class LSPSET {
+	shared_ptr<SPNODE> head, tail;
+public:
+	LSPSET()
+	{
+		head = make_shared<SPNODE>(numeric_limits<int>::min());
+		tail = make_shared<SPNODE>(numeric_limits<int>::max());
+		head->next = tail;
+	}
+	~LSPSET() { }
+
+	void Init()
+	{
+		head->next = tail;
+	}
+	bool Validate(const shared_ptr<SPNODE>& prev, const shared_ptr<SPNODE>& curr)
+	{
+		return (prev->removed == false) && (curr->removed == false) && (prev->next == curr);
+	}
+	bool Add(int key)
+	{
+		while (true)
+		{
+			shared_ptr<SPNODE> prev, curr;
+
+			prev = head;
+			curr = prev->next;
+			while (curr->key < key) {
+				prev = curr;
+				curr = curr->next;
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+			else {
+				shared_ptr<SPNODE> node = make_shared<SPNODE>(key);	// 이 또한 빼면 좋다
+				node->next = curr;
+				prev->next = node;
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
+		}
+	}
+	bool Remove(int key)
+	{
+		while (true)
+		{
+			shared_ptr<SPNODE> prev, curr;
+			prev = head;
+			curr = prev->next;
+			while (curr->key < key) {
+				prev = curr;
+				curr = curr->next;
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				curr->removed = true;
+				prev->next = curr->next;
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
+			else {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+		}
+	}
+	bool Contains(int key)
+	{
+		shared_ptr<SPNODE> curr;
+		curr = head->next;
+		while (curr->key < key) {
+			curr = curr->next;
+		}
+
+		return curr->key == key && !curr->removed;
+	}
+	void PrintTwenty() {
+		shared_ptr<SPNODE> prev, curr;
+		prev = head;
+		curr = prev->next;
+		int count = 0;
+
+		while (count < 20) {
+			cout << curr->key << ", ";
+			prev = curr;
+			curr = curr->next;
+			if (curr == tail)
+				break;
+			++count;
+		}
+		cout << endl;
+	}
+};
+class LASPSET {
+	shared_ptr<SPNODE> head, tail;
+public:
+	LASPSET()
+	{
+		head = make_shared<SPNODE>(numeric_limits<int>::min());
+		tail = make_shared<SPNODE>(numeric_limits<int>::max());
+		head->next = tail;
+	}
+	~LASPSET() { }
+
+	void Init()
+	{
+		head->next = tail;
+	}
+	bool Validate(const shared_ptr<SPNODE>& prev, const shared_ptr<SPNODE>& curr)
+	{
+		return (prev->removed == false) && (curr->removed == false) && (prev->next == curr);
+	}
+	bool Add(int key)
+	{
+		while (true)
+		{
+			shared_ptr<SPNODE> prev, curr;
+
+			prev = head;
+			curr = atomic_load(&prev->next);
+			while (curr->key < key) {
+				prev = curr;
+				curr = atomic_load(&curr->next);
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+			else {
+				shared_ptr<SPNODE> node = make_shared<SPNODE>(key);	// 이 또한 빼면 좋다
+				node->next = curr;
+				atomic_exchange(&prev->next, node);
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
+		}
+	}
+	bool Remove(int key)
+	{
+		while (true)
+		{
+			shared_ptr<SPNODE> prev, curr;
+			prev = head;
+			curr = atomic_load(&prev->next);
+			while (curr->key < key) {
+				prev = curr;
+				curr = atomic_load(&curr->next);
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				curr->removed = true;
+				atomic_exchange(&prev->next, curr->next);
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
+			else {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+		}
+	}
+	bool Contains(int key)
+	{
+		shared_ptr<SPNODE> curr;
+		curr = head->next;
+		while (curr->key < key) {
+			curr = atomic_load(&curr->next);
+		}
+
+		return curr->key == key && !curr->removed;
+	}
+	void PrintTwenty() {
+		shared_ptr<SPNODE> prev, curr;
+		prev = head;
+		curr = prev->next;
+		int count = 0;
+
+		while (count < 20) {
+			cout << curr->key << ", ";
+			prev = curr;
+			curr = curr->next;
+			if (curr == tail)
+				break;
+			++count;
+		}
+		cout << endl;
+	}
+};
+class LASPSET2 {
+	atomic_shared_ptr<ASPNODE> head, tail;
+public:
+	LASPSET2()
+	{
+		head = make_shared<ASPNODE>(numeric_limits<int>::min());
+		tail = make_shared<ASPNODE>(numeric_limits<int>::max());
+		head->next = tail;
+	}
+	~LASPSET2() { }
+
+	void Init()
+	{
+		head->next = tail;
+	}
+	bool Validate(const shared_ptr<ASPNODE>& prev, const shared_ptr<ASPNODE>& curr)
+	{
+		return (prev->removed == false) && (curr->removed == false) && (prev->next == curr);
+	}
+	bool Add(int key)
+	{
+		while (true)
+		{
+			shared_ptr<ASPNODE> prev, curr;
+
+			prev = head;
+			curr = prev->next;
+			while (curr->key < key) {
+				prev = curr;
+				curr = curr->next;
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+			else {
+				shared_ptr<ASPNODE> node = make_shared<ASPNODE>(key);	// 이 또한 빼면 좋다
+				node->next = curr;
+				prev->next = node;
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
+		}
+	}
+	bool Remove(int key)
+	{
+		while (true)
+		{
+			shared_ptr<ASPNODE> prev, curr;
+			prev = head;
+			curr = prev->next;
+			while (curr->key < key) {
+				prev = curr;
+				curr = curr->next;
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				curr->removed = true;
+				prev->next = curr->next;
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
+			else {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+		}
+	}
+	bool Contains(int key)
+	{
+		shared_ptr<ASPNODE> curr;
+		curr = head->next;
+		while (curr->key < key) {
+			curr = curr->next;
+		}
+
+		return curr->key == key && !curr->removed;
+	}
+	void PrintTwenty() {
+		shared_ptr<ASPNODE> prev, curr;
+		prev = head;
+		curr = prev->next;
+		int count = 0;
+
+		while (count < 20) {
+			cout << curr->key << ", ";
+			prev = curr;
+			curr = curr->next;
+			if (curr == shared_ptr<ASPNODE>{ tail })
+				break;
+			++count;
+		}
+		cout << endl;
+	}
+};
 
 constexpr int MAX_THREADS = 32;
-constexpr int NUM_TEST = 400'0000;
+constexpr int NUM_TEST = 4000000;
 constexpr int KEY_RANGE = 1000;
-CSET mySet;
+LASPSET2 mySet;
 
 class HISTORY {
 public:
@@ -633,7 +1163,7 @@ void ThreadFunc(vector<HISTORY>* history, int num_thread)
 
 void ThreadFunc_Check(vector<HISTORY>* history, int num_threads)
 {
-	for (int i = 0; i < 4000000 / num_threads; ++i) {
+	for (int i = 0; i < NUM_TEST / num_threads; ++i) {
 		int op = rand() % 3;
 		switch (op) {
 		case 0: {
