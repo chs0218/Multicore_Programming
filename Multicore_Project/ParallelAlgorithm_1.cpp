@@ -128,6 +128,17 @@ Wait-free 알고리즘은?
 - Lock을 사용하지 않는다고 lock-free 알고리즘이 아니다.
 - Lock을 사용하면 무조건 lock-free 알고리즘이 아니다.
 
+Non-Blocking은 게으른 동기화에서 시작해
+	- CAS로 atomic하게 Validation을 검사하고 수정한다.
+	- 실패하면 다시 검색한다.
+	- 단, CAS로 Validation을 검사하려면 marking이 false이고
+		prev의 next가 curr인지 확인해야한다.
+	- 그런데? CAS는 한번에 하나의 변수만 바꿀 수 있다!
+		- 그렇다면 한 장소에 주소와 Marking을 동시에 저장하자
+	- x86 CPU는 64bit 중 주소를 저장할 때,
+		왼쪽에서 16bit, 오른쪽에서 2bit를 사용하지 않는다.
+	- 그렇다면 LSB를 marked 변수로 사용하자
+		- 하지만 데이터가 망가진다
 
 */
 
@@ -138,7 +149,7 @@ public:
 	void unlock(){}
 };
 
-
+constexpr long long ADDR_MASK = 0xFFFFFFFFFFFFFFFE;
 class NODE {
 public:
 	int key;
@@ -151,9 +162,10 @@ public:
 		removed = false;
 		key = key_value;
 	}
+	~NODE() {}
 	void lock() { nlock.lock(); }
 	void unlock() { nlock.unlock(); }
-	~NODE() {}
+
 };
 class SPNODE {
 public:
@@ -171,6 +183,54 @@ public:
 	void unlock() { nlock.unlock(); }
 	~SPNODE() {}
 };
+class LFNODE {
+private:
+	LFNODE* volatile next;
+
+	bool CAS(long long oldValue, long long newValue)
+	{
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_llong*>(&next),
+			&oldValue, 
+			newValue);
+	}
+public:
+	int key;
+
+	LFNODE() { key = -1; next = NULL; }
+	LFNODE(int key_value) {
+		key = key_value;
+		next = NULL;
+	}
+	~LFNODE() {}
+	void SetNext(LFNODE* ptrNext)
+	{
+		next = ptrNext;
+	}
+	LFNODE* GetNext() {
+		long long ptr = reinterpret_cast<long long>(next) & ADDR_MASK;
+		return reinterpret_cast<LFNODE*>(ptr);
+	}
+	LFNODE* GetNext(bool* removed) {
+		long long llNext = reinterpret_cast<long long>(next);
+		*removed = ((llNext & 1) == 1);
+		return reinterpret_cast<LFNODE*>(llNext & ADDR_MASK);
+	}
+	bool GetRemoved() {
+		long long llNext = reinterpret_cast<long long>(next);
+		return ((llNext & 1) == 1);
+	}
+	bool CAS(LFNODE* oldNode, LFNODE* newNode, bool oldMark, bool newMark)
+	{
+		long long oldValue = reinterpret_cast<long long>(oldNode);
+		long long newValue = reinterpret_cast<long long>(newNode);
+		if (oldMark) oldValue = oldValue | 1;
+		if (newMark) newValue = newValue | 1;
+
+		return CAS(oldValue, newValue);
+	}
+};
+
 template<class T>
 struct atomic_shared_ptr {
 private:
@@ -758,6 +818,8 @@ public:
 		int count = 0;
 
 		while (count < 20) {
+			if (curr == &tail)
+				break;
 			cout << curr->key << ", ";
 			prev = curr;
 			curr = curr->next;
@@ -1126,11 +1188,131 @@ public:
 		cout << endl;
 	}
 };
+class LFSET {
+	LFNODE head, tail;
+public:
+	LFSET()
+	{
+		head.key = numeric_limits<int>::min();
+		tail.key = numeric_limits<int>::max();
+		head.SetNext(&tail);
+	}
+	~LFSET() { Init(); }
+
+	void Init()
+	{
+		LFNODE* ptr;
+		while (head.GetNext() != &tail) {
+			ptr = head.GetNext();
+			head.SetNext(ptr->GetNext());
+			delete ptr;
+		}
+	}
+	void Find(LFNODE* &prev, LFNODE* &curr, int key)
+	{
+	retry:
+		prev = &head;
+		curr = prev->GetNext();
+		while (true)
+		{
+			bool removed;
+			LFNODE* succ = curr->GetNext(&removed);
+			while(removed)
+			{
+				if (prev->CAS(curr, succ, false, false) == false)
+					goto retry;
+				curr = succ;
+				succ = curr->GetNext(&removed);
+			}
+
+			if (curr->key >= key)
+				return;
+
+			prev = curr;
+			curr = succ;
+		}
+	}
+	bool Add(int key)
+	{
+		LFNODE* node = new LFNODE{ key };
+		while (true)
+		{
+			LFNODE* prev, * curr;
+
+			Find(prev, curr, key);
+
+			if (key == curr->key) {
+				delete node;
+				return false;
+			}
+			else {
+				node->SetNext(curr);
+				if (prev->CAS(curr, node, false, false))
+				{
+					LFNODE* tmp = prev->GetNext();
+					return true;
+				}
+			}
+		}
+	}
+	bool Remove(int key)
+	{
+		/*while (true)
+		{
+			LFNODE* prev, * curr;
+			Find(prev, curr, key);
+
+			if (key == curr->key) {
+				LFNODE* succ = curr->GetNext();
+				if (succ->CAS(succ, succ, false, true) == false)
+					continue;
+				
+
+
+				curr->
+				curr->removed = true;
+				prev->next = curr->next;
+				return true;
+			}
+			else {
+				return false;
+			}
+		}*/
+		return false;
+	}
+	bool Contains(int key)
+	{
+		LFNODE* prev, * curr;
+		Find(prev, curr, key);
+
+		if (key == curr->key) {
+			return !curr->GetRemoved();
+		}
+		return false;
+	}
+	void PrintTwenty() {
+		LFNODE* prev, * curr;
+		prev = &head;
+		curr = prev->GetNext();
+		int count = 0;
+
+		while (count < 20) {
+			if (curr == &tail)
+				break;
+
+			cout << curr->key << ", ";
+			prev = curr;
+			curr = curr->GetNext();
+			++count;
+		}
+		cout << endl;
+	}
+};
 
 constexpr int MAX_THREADS = 32;
 constexpr int NUM_TEST = 4000000;
 constexpr int KEY_RANGE = 1000;
-LASPSET2 mySet;
+LFSET mySet;
 
 class HISTORY {
 public:
@@ -1145,7 +1327,7 @@ void ThreadFunc(vector<HISTORY>* history, int num_thread)
 	int key;
 	for (int i = 0; i < NUM_TEST / num_thread; ++i)
 	{
-		switch (rand() % 3) {
+		switch (/*rand() % 3*/0) {
 		case 0: key = rand() % KEY_RANGE;
 			mySet.Add(key);
 			break;
@@ -1164,7 +1346,7 @@ void ThreadFunc(vector<HISTORY>* history, int num_thread)
 void ThreadFunc_Check(vector<HISTORY>* history, int num_threads)
 {
 	for (int i = 0; i < NUM_TEST / num_threads; ++i) {
-		int op = rand() % 3;
+		int op = /*rand() % 3*/0;
 		switch (op) {
 		case 0: {
 			int v = rand() % KEY_RANGE;
