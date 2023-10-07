@@ -1248,36 +1248,32 @@ public:
 			else {
 				node->SetNext(curr);
 				if (prev->CAS(curr, node, false, false))
-				{
-					LFNODE* tmp = prev->GetNext();
 					return true;
-				}
 			}
 		}
 	}
 	bool Remove(int key)
 	{
-		/*while (true)
-		{
-			LFNODE* prev, * curr;
-			Find(prev, curr, key);
+		while (true) {
+			LFNODE* prev = &head;
+			LFNODE* curr = prev->GetNext();
+			Find(prev, curr,key);
 
-			if (key == curr->key) {
-				LFNODE* succ = curr->GetNext();
-				if (succ->CAS(succ, succ, false, true) == false)
-					continue;
-				
-
-
-				curr->
-				curr->removed = true;
-				prev->next = curr->next;
-				return true;
-			}
-			else {
+			if (curr->key != key) {
 				return false;
 			}
-		}*/
+			else
+			{
+				LFNODE* succ = curr->GetNext();
+
+				if (false == curr->CAS(succ, succ, false, true))
+					continue;
+
+				prev->CAS(curr, succ, false, false);
+				return true;
+			}
+		}
+		return true;
 		return false;
 	}
 	bool Contains(int key)
@@ -1327,7 +1323,7 @@ void ThreadFunc(vector<HISTORY>* history, int num_thread)
 	int key;
 	for (int i = 0; i < NUM_TEST / num_thread; ++i)
 	{
-		switch (/*rand() % 3*/0) {
+		switch (rand() % 3) {
 		case 0: key = rand() % KEY_RANGE;
 			mySet.Add(key);
 			break;
@@ -1346,7 +1342,7 @@ void ThreadFunc(vector<HISTORY>* history, int num_thread)
 void ThreadFunc_Check(vector<HISTORY>* history, int num_threads)
 {
 	for (int i = 0; i < NUM_TEST / num_threads; ++i) {
-		int op = /*rand() % 3*/0;
+		int op = rand() % 3;
 		switch (op) {
 		case 0: {
 			int v = rand() % KEY_RANGE;
