@@ -140,6 +140,14 @@ Non-Blocking은 게으른 동기화에서 시작해
 	- 그렇다면 LSB를 marked 변수로 사용하자
 		- 하지만 데이터가 망가진다
 
+그럼 Lock-free 알고리즘을 우리 프로젝트에서 쓸 수 있느냐?
+	- 안된다! 메모리 관리가 제대로 되고 있지 않다 ㅠ
+	- 그럼 atomic share_ptr은?
+		- 느리다. blocking 구현이기도 하다.
+		- 지역 변수는 atomic이 아닌 shared_ptr를 사용한다
+		- 함수의 parameter에는 const reference를 사용한다.
+		- Pointer의 update가 자주 발생하는 경우 shared_ptr로 사용하지 않는다.
+	- C++20에서부터 atomic_shared_ptr가 지원된다.
 */
 
 class my_mutex
@@ -335,6 +343,23 @@ public:
 	volatile bool removed;
 	ASPNODE() : key(-1), next(nullptr), removed(false) {}
 	ASPNODE(int x) : key(x), next(nullptr), removed(false) {}
+	void lock()
+	{
+		n_lock.lock();
+	}
+	void unlock()
+	{
+		n_lock.unlock();
+	}
+};
+class ASPNODE2 {
+	mutex n_lock;
+public:
+	int key;
+	atomic<shared_ptr<ASPNODE2>> next;
+	volatile bool removed;
+	ASPNODE2() : key(-1), next(nullptr), removed(false) {}
+	ASPNODE2(int x) : key(x), next(nullptr), removed(false) {}
 	void lock()
 	{
 		n_lock.lock();
@@ -828,6 +853,7 @@ public:
 		cout << endl;
 	}
 };
+#if 0
 class LSPSET {
 	shared_ptr<SPNODE> head, tail;
 public:
@@ -1068,6 +1094,7 @@ public:
 		cout << endl;
 	}
 };
+#endif
 class LASPSET2 {
 	atomic_shared_ptr<ASPNODE> head, tail;
 public:
@@ -1305,10 +1332,140 @@ public:
 	}
 };
 
+//C++20의 atomic shared_ptr 사용
+class LASPSET3 {
+	atomic<shared_ptr<ASPNODE2>> head, tail;
+public:
+	LASPSET3()
+	{
+		head = make_shared<ASPNODE2>(numeric_limits<int>::min());
+		tail = make_shared<ASPNODE2>(numeric_limits<int>::max());
+		shared_ptr<ASPNODE2> h = head;
+		shared_ptr<ASPNODE2> t = tail;
+		h->next = t;
+	}
+	~LASPSET3() { }
+
+	void Init()
+	{
+		shared_ptr<ASPNODE2> h = head;
+		shared_ptr<ASPNODE2> t = tail;
+		h->next = t;
+	}
+	bool Validate(const shared_ptr<ASPNODE2>& prev, const shared_ptr<ASPNODE2>& curr)
+	{
+		shared_ptr<ASPNODE2> p = prev->next;
+		return (prev->removed == false) && (curr->removed == false) && (p == curr);
+	}
+	bool Add(int key)
+	{
+		while (true)
+		{
+			shared_ptr<ASPNODE2> prev, curr;
+
+			prev = head;
+			curr = prev->next;
+			while (curr->key < key) {
+				prev = curr;
+				curr = curr->next;
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+			else {
+				shared_ptr<ASPNODE2> node = make_shared<ASPNODE2>(key);	// 이 또한 빼면 좋다
+				node->next = curr;
+				prev->next = node;
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
+		}
+	}
+	bool Remove(int key)
+	{
+		while (true)
+		{
+			shared_ptr<ASPNODE2> prev, curr;
+			prev = head;
+			curr = prev->next;
+			while (curr->key < key) {
+				prev = curr;
+				curr = curr->next;
+			}
+
+			prev->lock();
+			curr->lock();
+
+			if (!Validate(prev, curr))
+			{
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+
+			if (key == curr->key) {
+				curr->removed = true;
+
+				shared_ptr<ASPNODE2> p1 = prev;
+				shared_ptr<ASPNODE2> p2 = curr->next;
+
+				p1 = p2;
+				prev->unlock();
+				curr->unlock();
+				return true;
+			}
+			else {
+				prev->unlock();
+				curr->unlock();
+				return false;
+			}
+		}
+	}
+	bool Contains(int key)
+	{
+		shared_ptr<ASPNODE2> curr = head;
+
+		while (curr->key < key) {
+			curr = curr->next;
+		}
+
+		return curr->key == key && !curr->removed;
+	}
+	void PrintTwenty() {
+		shared_ptr<ASPNODE2> prev, curr;
+		prev = head;
+		curr = prev->next;
+		int count = 0;
+
+		while (count < 20) {
+			cout << curr->key << ", ";
+			prev = curr;
+			curr = curr->next;
+			if (curr == shared_ptr<ASPNODE2>{ tail })
+				break;
+			++count;
+		}
+		cout << endl;
+	}
+};
 constexpr int MAX_THREADS = 32;
 constexpr int NUM_TEST = 4000000;
 constexpr int KEY_RANGE = 1000;
-LFSET mySet;
+LASPSET3 mySet;
 
 class HISTORY {
 public:
