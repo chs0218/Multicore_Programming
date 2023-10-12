@@ -148,6 +148,68 @@ Non-Blocking은 게으른 동기화에서 시작해
 		- 함수의 parameter에는 const reference를 사용한다.
 		- Pointer의 update가 자주 발생하는 경우 shared_ptr로 사용하지 않는다.
 	- C++20에서부터 atomic_shared_ptr가 지원된다.
+	- 재사용을 위해서는?
+		- Free-List를 사용한다.
+		- shared_ptr를 사용한다.
+
+메모리 릭 해결?
+
+Lock-free List 사용
+	- Free List(자료구조 시간에 배우는 메모리 재사용 리스트)
+	- NonBlocking에서 아용하기 위해서는 NonBlocking Free List로 구현해야한다.
+		- CAS를 사용해서 구현할 수 있다.
+	- Free List에 있는 Node 재사용
+		- 재사용하지 않으면 Memory Leak과 다를 바 없다
+		- 제한 없이 재사용하면?
+			- Remove()에서 넣은 것을 Add()에서 다시 사용
+			- Free List에 넣지 않고 그냥 delete하는 것과 같다.
+			- 알고리즘이 오동작 : 검색에서 밟고 지나가는 노드가 다른 곳에 가서 붙는다
+			- 안전하게 재사용 하려면 모든 쓰레드가 종료했을 때 재사용하면 된다.
+			- 실제 게임에서는 모든 쓰레드의 종료는 게임이 종료했을 때이다.
+				- 쓰레드 생성/소멸 오버헤드가 크기 때문에 게임 실행 중에는 쓰레드를 생성하지 않는다.
+			- 실제 게임에서는 이러한 Lock-Free 재활용 리스트를 사용할 수 없다.
+
+Atomic shared_ptr
+	- Blocking이다
+	- LFNODE에서 사용할 수 없다.
+	- 느리다
+	- 판매하는 사용버전의 lock-free atomic_shared_ptr 사용한다.
+	- 선배가 구현한 lock_free atomic_shared_ptr 사용한다.
+		- 검증이 필요
+stamped pointer - LF QUEUE 챕터에서 다룸
+
+EPOCH (Epoch Based Reuse) - Lock Free Free-List
+	- 쓰레드가 종료하지 않아도 재사용 가능 여부를 판단할 수 있게한다.
+	- Remove된 노드를 Access 하는 포인터가 모든 쓰레드에서 존재하지 않는다.
+	- Remove되는 순간에 다른 쓰레드들에서 실행중인 메소드들이 다 종료하면, 
+		Remove된 Node를 가리키는 포인터는 존재하지 않는다.
+		- Remove 되는 Node에 현재 시간을 저장하고, 모든 쓰레드에서 메소드들의 시작시간과 종료
+			시간을 적으면 판단이 가능하다.
+
+	- 모든 공유 객체는 Epoch Counter와 Thread Epoch Counter[]를 갖고있다.
+		- Chrono는 정밀하지 않고 오버헤드가 크고 데이터 크기가 크기 때문에 쓰지 않는다.
+	- Mothod 호출시
+		- EPOCH Counter를 증가
+		- Thread Epoch Counter[my_thread_id] = EPOCH Counter
+		- 메소드 실행
+		- Thread Epoch Counter[my_thread_id] = 0
+	- 각 쓰레드들은 자신만의 memory pool(free list)을 관리한다.
+	- remove된 노드를 자신의 memory pool에 MAX(Thread Epoch Counter[])와 같이 넣는다.
+	- 일정 시간이 지나면 memory pool에 있는 객체들을 실제로 delete 한다.
+	- Thread Epoch Counter[]의 0이 아닌 최소 값보다 작은 값을 갖고 있는 객체만 delete한다.
+	- 단점: 어느 한 쓰레드의 Thread Epoch Counter가 증가하지 않는 경우 memory leak과 다름없다.
+
+Hazard Pointer
+
+CAS 없이는 non-blocking 자료구조를 만들 수 없음을 증명
+Lock-free Queue의 구현
+	- ABA 문제
+	- Stamped Pointer 구현
+Lock-free Stack의 구현
+	- TOP 노드에서의 bottleneck 해소
+O(log n) 검색 List 구현
+	- Lock-free SkipList
+	- Free List를 통한 Node 재사용의 구현
 */
 
 class my_mutex
@@ -853,7 +915,7 @@ public:
 		cout << endl;
 	}
 };
-#if 0
+#if NOTC20
 class LSPSET {
 	shared_ptr<SPNODE> head, tail;
 public:
@@ -1462,6 +1524,12 @@ public:
 		cout << endl;
 	}
 };
+
+// Lock Free 버전의 게으른 동기화 구현
+// Eclass 파일을 찾지 못함;
+
+
+
 constexpr int MAX_THREADS = 32;
 constexpr int NUM_TEST = 4000000;
 constexpr int KEY_RANGE = 1000;
