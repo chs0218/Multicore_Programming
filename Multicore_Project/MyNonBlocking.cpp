@@ -255,7 +255,7 @@ struct UNODE
 
 	UNODE() { m_nSeq = 0; next = nullptr; }
 	~UNODE() { }
-	UNODE(Invocation& inv) : m_Inv(inv), next(nullptr) {};
+	UNODE(Invocation& inv) : m_Inv(inv) { m_nSeq = 0; next = nullptr; };
 };
 
 class STD_SET {
