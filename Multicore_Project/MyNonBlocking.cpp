@@ -153,7 +153,7 @@ using namespace std::chrono;
 */
 
 constexpr int MAX_THREADS = 32;
-constexpr int NUM_TEST = 4000000;
+constexpr int NUM_TEST = 40000;
 constexpr int KEY_RANGE = 1000;
 
 enum class METHOD_TYPE
@@ -301,6 +301,98 @@ public:
 		cout << endl;
 	}
 };
+class SINGLE_THREAD_SET {
+	set<int> mySet;
+public:
+	SINGLE_THREAD_SET()
+	{
+	}
+	~SINGLE_THREAD_SET() { Init(); }
+	void Init()
+	{
+		mySet.clear();
+	}
+	bool Add(int key)
+	{
+		if (mySet.contains(key))
+			return false;
+		mySet.insert(key);
+		return true;
+	}
+	bool Remove(int key)
+	{
+		return mySet.erase(key);
+	}
+	bool Contains(int key)
+	{
+		return mySet.contains(key);
+	}
+	void PrintTwenty() {
+		int count = 0;
+		for (const int& v : mySet)
+		{
+			cout << v << ", ";
+			if (++count == 20)
+				break;
+		}
+		cout << endl;
+	}
+};
+
+class MUTEX_SET {
+	set<int> mySet;
+	mutex m_lock;
+public:
+	MUTEX_SET()
+	{
+	}
+	~MUTEX_SET() { Init(); }
+	void Init()
+	{
+		mySet.clear();
+	}
+	bool Add(int key)
+	{
+		m_lock.lock();
+		if (mySet.contains(key))
+		{
+			m_lock.unlock();
+			return false;
+		}
+		mySet.insert(key);
+		m_lock.unlock();
+		return true;
+	}
+	bool Remove(int key)
+	{
+		m_lock.lock();
+		int nCount = mySet.erase(key);
+		m_lock.unlock();
+		return nCount;
+	}
+	bool Contains(int key)
+	{
+		m_lock.lock();
+		if (mySet.contains(key))
+		{
+			m_lock.unlock();
+			return true;
+		}
+		m_lock.unlock();
+		return false;
+		
+	}
+	void PrintTwenty() {
+		int count = 0;
+		for (const int& v : mySet)
+		{
+			cout << v << ", ";
+			if (++count == 20)
+				break;
+		}
+		cout << endl;
+	}
+};
 
 class LF_UNIV_STD_SET{
 private:
@@ -319,18 +411,18 @@ public:
 				max_n = head[i];
 		return max_n;
 	}
-	Response Apply(Invocation invoc, int thread_id) {
-		int i = thread_id;
-		UNODE prefer = UNODE(invoc);
-		while (prefer.m_nSeq == 0) {
+	Response Apply(Invocation invoc) {
+		int i = THREAD_ID();
+		UNODE* prefer = new UNODE(invoc);
+		while (prefer->m_nSeq == 0) {
 			UNODE* before = max_node();
-			UNODE* after = before->decide_next.decide(&prefer);
+			UNODE* after = before->decide_next.decide(prefer);
 			before->next = after; after->m_nSeq = before->m_nSeq + 1;
 			head[i] = after;
 		}
 		SeqObject_set myObject;
 		UNODE* current = tail.next;
-		while (current != &prefer) {
+		while (current != prefer) {
 			myObject.Apply(current->m_Inv);
 			current = current->next;
 		}
@@ -348,33 +440,197 @@ public:
 	void Init()
 	{
 		Invocation inv{ METHOD_TYPE::OP_CLEAR, 0 };
-		Response a = mySet.Apply(inv, THREAD_ID());
+		Response a = mySet.Apply(inv);
 	}
 	bool Add(int key)
 	{
 		Invocation inv{ METHOD_TYPE::OP_ADD, key };
-		Response a = mySet.Apply(inv, THREAD_ID());
+		Response a = mySet.Apply(inv);
 		return a.m_bResult;
 	}
 	bool Remove(int key)
 	{
 		Invocation inv{ METHOD_TYPE::OP_REMOVE, key };
-		Response a = mySet.Apply(inv, THREAD_ID());
+		Response a = mySet.Apply(inv);
 		return a.m_bResult;
 	}
 	bool Contains(int key)
 	{
 		Invocation inv{ METHOD_TYPE::OP_CONTAINS, key };
-		Response a = mySet.Apply(inv, THREAD_ID());
+		Response a = mySet.Apply(inv);
 		return a.m_bResult;
 	}
 	void PrintTwenty() {
 		Invocation inv{ METHOD_TYPE::OP_GET20, 0 };
-		Response a = mySet.Apply(inv, THREAD_ID());
-		int count = 20;
-		for (auto& v : a.m_vGet20)
+		Response a = mySet.Apply(inv);
+		for (const auto& v : a.m_vGet20)
 		{
 			cout << v << ", ";
+		}
+		cout << endl;
+	}
+};
+
+constexpr long long ADDR_MASK = 0xFFFFFFFFFFFFFFFE;
+class LFNODE {
+private:
+	LFNODE* volatile next;
+
+	bool CAS(long long oldValue, long long newValue)
+	{
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_llong*>(&next),
+			&oldValue,
+			newValue);
+	}
+public:
+	int key;
+
+	LFNODE() { key = -1; next = NULL; }
+	LFNODE(int key_value) {
+		key = key_value;
+		next = NULL;
+	}
+	~LFNODE() {}
+	void SetNext(LFNODE* ptrNext)
+	{
+		next = ptrNext;
+	}
+	LFNODE* GetNext() {
+		long long ptr = reinterpret_cast<long long>(next) & ADDR_MASK;
+		return reinterpret_cast<LFNODE*>(ptr);
+	}
+	LFNODE* GetNext(bool* removed) {
+		long long llNext = reinterpret_cast<long long>(next);
+		*removed = ((llNext & 1) == 1);
+		return reinterpret_cast<LFNODE*>(llNext & ADDR_MASK);
+	}
+	bool GetRemoved() {
+		long long llNext = reinterpret_cast<long long>(next);
+		return ((llNext & 1) == 1);
+	}
+	bool CAS(LFNODE* oldNode, LFNODE* newNode, bool oldMark, bool newMark)
+	{
+		long long oldValue = reinterpret_cast<long long>(oldNode);
+		long long newValue = reinterpret_cast<long long>(newNode);
+		if (oldMark) oldValue = oldValue | 1;
+		if (newMark) newValue = newValue | 1;
+
+		return CAS(oldValue, newValue);
+	}
+};
+class LFSET {
+	LFNODE head, tail;
+public:
+	LFSET()
+	{
+		head.key = numeric_limits<int>::min();
+		tail.key = numeric_limits<int>::max();
+		head.SetNext(&tail);
+	}
+	~LFSET() { Init(); }
+
+	void Init()
+	{
+		LFNODE* ptr;
+		while (head.GetNext() != &tail) {
+			ptr = head.GetNext();
+			head.SetNext(ptr->GetNext());
+			delete ptr;
+		}
+	}
+	void Find(LFNODE*& prev, LFNODE*& curr, int key)
+	{
+	retry:
+		prev = &head;
+		curr = prev->GetNext();
+		while (true)
+		{
+			bool removed;
+			LFNODE* succ = curr->GetNext(&removed);
+			while (removed)
+			{
+				if (prev->CAS(curr, succ, false, false) == false)
+					goto retry;
+				curr = succ;
+				succ = curr->GetNext(&removed);
+			}
+
+			if (curr->key >= key)
+				return;
+
+			prev = curr;
+			curr = succ;
+		}
+	}
+	bool Add(int key)
+	{
+		LFNODE* node = new LFNODE{ key };
+		while (true)
+		{
+			LFNODE* prev, * curr;
+
+			Find(prev, curr, key);
+
+			if (key == curr->key) {
+				delete node;
+				return false;
+			}
+			else {
+				node->SetNext(curr);
+				if (prev->CAS(curr, node, false, false))
+					return true;
+			}
+		}
+	}
+	bool Remove(int key)
+	{
+		while (true) {
+			LFNODE* prev = &head;
+			LFNODE* curr = prev->GetNext();
+			Find(prev, curr, key);
+
+			if (curr->key != key) {
+				return false;
+			}
+			else
+			{
+				LFNODE* succ = curr->GetNext();
+
+				if (false == curr->CAS(succ, succ, false, true))
+					continue;
+
+				prev->CAS(curr, succ, false, false);
+				return true;
+			}
+		}
+		return true;
+		return false;
+	}
+	bool Contains(int key)
+	{
+		LFNODE* prev, * curr;
+		Find(prev, curr, key);
+
+		if (key == curr->key) {
+			return !curr->GetRemoved();
+		}
+		return false;
+	}
+	void PrintTwenty() {
+		LFNODE* prev, * curr;
+		prev = &head;
+		curr = prev->GetNext();
+		int count = 0;
+
+		while (count < 20) {
+			if (curr == &tail)
+				break;
+
+			cout << curr->key << ", ";
+			prev = curr;
+			curr = curr->GetNext();
+			++count;
 		}
 		cout << endl;
 	}
@@ -484,7 +740,7 @@ int main()
 {
 	for (int i = 1; i <= MAX_THREADS; i *= 2)
 	{
-		LF_STD_SET mySet;
+		MY_SET mySet;
 
 		vector<thread> threads;
 		array<vector <HISTORY>, MAX_THREADS> history;
@@ -510,7 +766,7 @@ int main()
 
 	for (int i = 1; i <= MAX_THREADS; i *= 2)
 	{
-		LF_STD_SET mySet;
+		MY_SET mySet;
 
 		vector<thread> threads;
 		array<vector <HISTORY>, MAX_THREADS> history;
