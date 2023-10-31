@@ -5,10 +5,6 @@
 #include <thread>
 #include <mutex>
 #include <limits>
-
-using namespace std;
-using namespace std::chrono;
-
 /*
 Non Blocking 자료 구조를 제작해보자
 최종적으로 Lock-Free 자료구조를 제작한다.
@@ -211,6 +207,12 @@ O(log n) 검색 List 구현
 - Lock-free SkipList
 - Free List를 통한 Node 재사용의 구현
 */
+
+using namespace std;
+using namespace chrono;
+
+constexpr int MAX_THREADS = 32;
+constexpr int NUM_TEST = 1000'0000;
 
 class my_mutex
 {

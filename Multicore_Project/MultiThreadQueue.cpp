@@ -36,6 +36,31 @@ ABA 문제?
 	- 단, Wait-free로 구현 불가능
 
 - shared_ptr를 사용한다.(하지만 lock free가 아니다.)
+
+
+
+// 중간고사
+Convoying
+- Lock을 얻은 쓰레드가 스케줄링에서 제외되어 다른 Lock을 필요로 하는 쓰레드들이 공회전하는 현상
+다른 쓰레드들의 실행을 지속시켜줄 코드를 실행할 쓰레드가 스케줄링에서 제외되는 현상
+(Lock이 아니더라도 Convoying이 일어날 수 있다.)
+
+형제 쓰레드의 Stack 영역에 접근하면 메모리 보호 오류가 발생하지 않는다..?
+-> 왜 일까?
+
+메모리 일관성 오류의 원인은 Core들이 별도의 캐시를 갖고 있기 때문이 아니라 메모리 일관성 오류는 Out of execution으로 인해 생긴다.
+CAS연산을 SW로 구현하지 않고 별도의 명령어로 구현하는 것은 NonBlocking 구현을 위해서이다!!
+
+C++20의 atomic<shared_ptr<T>>는 전역 lock을 사용하지 않는다.
+지역변수로 사용하는 shared_ptr는 atomic으로 선언할 필요가 없다.(Data Race가 없기 때문)
+
+Hazard는 공유 메모리에 대한 포인터를 사용 전 등록하는 방식, 포인터 합성 기법과 같이 사용할 수 없다.
+
+atomic 메모리로 Queue를 구현할 수 있다면 atomic 메모리로 합의 수가 2인 합의 객체를 구현할 수 있고,
+atomic 메모리의 합의 수가 1이라는 가정에 모순된다. 따라서 atomic 메모리로 Queue를 구현할 수 없다.
+
+curr->removed = true와 prev->next = curr->next의 순서가 바뀌면 링크에서 제외된 노드가 valid하다고 판단할 수 있다.
+함수 하나에서 atomic하게 한번에 메모리를 읽어와 작업해야한다.
 */
 
 using namespace std;
@@ -323,7 +348,7 @@ void Worker(MY_QUEUE* myQueue, int threadNum, int threadID)
 {
 	tl_id = threadID;
 	for (int i = 0; i < NUM_TEST / threadNum; i++) {
-		if ((rand() % 2) || i < 126 / threadNum) {
+		if ((rand() % 2) || i < 128 / threadNum) {
 			myQueue->ENQ(i);
 		}
 		else {
