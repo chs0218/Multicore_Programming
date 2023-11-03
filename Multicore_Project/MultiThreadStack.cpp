@@ -1,3 +1,26 @@
+/*
+노드가 많으면 충돌 확률이 적으나, stack과 queue는 많이(거의 다) 충돌하게 된다.
+이로인해 병렬성이 적어, 멀티 쓰레드에서 빨라질 수 없다!!
+=> 순차 병목현상
+
+ABA 문제가 생길 확률이 더 높다.
+하지만 그렇다 해서 LFStack을 쓰지 않을 이유가 없다.
+
+경쟁이 심할경우 CAS 실패 시 계속 재시도하는 것은 전체 시스템에 악영향을 준다.
+
+BACK OFF 스택을 사용
+
+Back Off란?
+경쟁이 심할 경우 경쟁을 줄이자!
+CAS가 실패했을 경우 적절한 기간 동안 실행을 멈추었다가 재개
+
+적절한 기간이란?
+처음에는 짧게, 계속 실패하면 점점 길게
+Thread마다 기간은 다르게 해야한다.
+
+단, 운영체제를 호출하면 오버헤드로 인해 성능이 감소할 수 있다
+*/
+
 #include <iostream>
 #include <array>
 #include <vector>
@@ -27,6 +50,24 @@ public:
 	}
 	~NODE() {}
 
+};
+class BackOff {
+	int minDelay, maxDelay;
+	int limit;
+public:
+	BackOff(int min, int max)
+		: minDelay(min), maxDelay(max), limit(min) {}
+	void relax() {
+		int delay = 0;
+		if(limit == 0) limit = 1;
+		delay = rand() % limit;
+		limit *= 2;
+		if (limit > maxDelay) limit = maxDelay;
+		this_thread::sleep_for(chrono::microseconds(delay));;
+	}
+	void reduce() {
+		limit /= 2;
+	}
 };
 
 class CSTACK {
@@ -116,6 +157,83 @@ public:
 
 			if (CAS(&top, ptr, ptr->next))
 				return ptr->key;
+		}
+	}
+
+	void PrintTwenty() {
+		NODE* p = top;
+		int count = 0;
+		for (int i = 0; i < 20; ++i)
+		{
+			if (p == nullptr) break;
+			cout << p->key << " ";
+			p = p->next;
+		}
+		cout << endl;
+	}
+	void Init()
+	{
+		NODE* p = top;
+		while (p != nullptr)
+		{
+			NODE* t = p;
+			p = p->next;
+			delete t;
+		}
+		top = nullptr;
+	}
+	bool CAS(NODE* volatile* addr, NODE* oldNode, NODE* newNode)
+	{
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_llong*>(addr),
+			reinterpret_cast<long long*>(&oldNode),
+			reinterpret_cast<long long>(newNode)
+		);
+	}
+};
+class LFBOSTACK {
+	BackOff backoff{ 1, MAX_THREADS };
+	NODE* volatile top;
+public:
+	LFBOSTACK()
+	{
+		top = nullptr;
+	}
+	~LFBOSTACK() { }
+	void PUSH(int x)
+	{
+		NODE* e = new NODE(x);
+		bool first_time = true;
+
+		while (1) {
+			e->next = top;
+
+			if (CAS(&top, e->next, e)) {
+				if (first_time)backoff.reduce();
+				return;
+			}
+
+			first_time = false;
+			backoff.relax();
+		}
+	}
+	int POP()
+	{
+		while (1) {
+			NODE* ptr = top;
+			bool first_time = true;
+
+			if (ptr == nullptr)
+				return -2;
+
+			if (CAS(&top, ptr, ptr->next))
+			{
+				if (first_time)backoff.reduce();
+				return ptr->key;
+			}
+
+			first_time = false;
+			backoff.relax();
 		}
 	}
 
