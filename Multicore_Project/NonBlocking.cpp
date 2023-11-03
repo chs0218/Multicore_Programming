@@ -64,11 +64,32 @@ ACE << Lock 명령을 위해 개발
 
 Convoying이 의심되면 this_thread::yield()를 사용해보자.
 */
+class BackOff {
+	int minDelay, maxDelay;
+	int limit;
+public:
+	BackOff(int min, int max)
+		: minDelay(min), maxDelay(max), limit(min) {}
+	void relax() {
+		int delay = 0;
+		if (limit != 0) delay = rand() % limit;
+		if (limit == 0) limit = 1;
+		else limit *= 2;
+		if (limit > maxDelay) limit = maxDelay;
+		this_thread::sleep_for(chrono::microseconds(delay));;
+	}
+	void reduce() {
+		limit /= 2;
+	}
+};
 
-const int MAX_THREADS = 16;
+const int MAX_THREADS = 32;
 
 volatile int sum;
 volatile int LOCK = 0;
+
+BackOff backoff{ 1, MAX_THREADS };
+
 bool CAS(volatile int* addr, int expected, int new_val)
 {
 	return atomic_compare_exchange_strong(
@@ -78,6 +99,15 @@ void CAS_LOCK()
 {
 	while (!CAS(&LOCK, 0, 1)) this_thread::yield();
 }
+void CAS_BOLOCK()
+{
+	bool first_time = true;
+	while (!CAS(&LOCK, 0, 1)) {
+		backoff.relax();
+		first_time = false;
+	};
+	if (first_time) backoff.reduce();
+}
 void CAS_UNLOCK()
 {
 	LOCK = 0;
@@ -86,7 +116,7 @@ void worker(int num_threads)
 {
 	const int loop_count = 50000000 / num_threads;
 	for (auto i = 0; i < loop_count; ++i) {
-		CAS_LOCK();
+		CAS_BOLOCK();
 		sum = sum + 2;
 		CAS_UNLOCK();
 	}

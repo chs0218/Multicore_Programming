@@ -19,6 +19,10 @@ CAS가 실패했을 경우 적절한 기간 동안 실행을 멈추었다가 재개
 Thread마다 기간은 다르게 해야한다.
 
 단, 운영체제를 호출하면 오버헤드로 인해 성능이 감소할 수 있다
+그렇다면 내장 CPU Counter를 이용해보자
+
+RDTSC => Read Time Stack Counter(값이 eax에들어가고) 
+mov start, eax (start에 저장)
 */
 
 #include <iostream>
@@ -59,9 +63,9 @@ public:
 		: minDelay(min), maxDelay(max), limit(min) {}
 	void relax() {
 		int delay = 0;
-		if(limit == 0) limit = 1;
-		delay = rand() % limit;
-		limit *= 2;
+		if (limit != 0) delay = rand() % limit;
+		if (limit == 0) limit = 1;
+		else limit *= 2;
 		if (limit > maxDelay) limit = maxDelay;
 		this_thread::sleep_for(chrono::microseconds(delay));;
 	}
@@ -275,7 +279,7 @@ int Thread_id()
 	return tl_id;
 }
 
-typedef LFSTACK MY_STACK;
+typedef LFBOSTACK MY_STACK;
 
 void worker(MY_STACK* my_stack, int threadNum, int th_id)
 {
