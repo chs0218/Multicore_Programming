@@ -1,6 +1,8 @@
 #include <iostream>
 #include <array>
 #include <vector>
+#include <set>
+#include <unordered_set>
 #include <chrono>
 #include <thread>
 #include <mutex>
@@ -11,6 +13,8 @@ using namespace chrono;
 
 constexpr int MAX_THREADS = 32;
 constexpr int NUM_TEST = 1000'0000;
+
+atomic_int stack_size = 0;
 
 class NODE {
 public:
@@ -110,7 +114,7 @@ public:
 			if (ptr == nullptr)
 				return -2;
 
-			if (&top, ptr, ptr->next)
+			if (CAS(&top, ptr, ptr->next))
 				return ptr->key;
 		}
 	}
@@ -155,46 +159,122 @@ int Thread_id()
 
 typedef LFSTACK MY_STACK;
 
-void Worker(MY_STACK* myQueue, int threadNum, int threadID)
+void worker(MY_STACK* my_stack, int threadNum, int th_id)
 {
-	tl_id = threadID;
+	tl_id = th_id;
+
 	for (int i = 0; i < NUM_TEST / threadNum; i++) {
 		if ((rand() % 2) || i < 1024 / threadNum) {
-			myQueue->PUSH(i);
+			my_stack->PUSH(i);
 		}
 		else {
-			myQueue->POP();
+			my_stack->POP();
 		}
 	}
 }
 
+struct HISTORY {
+	vector <int> push_values, pop_values;
+};
+
+void worker_check(MY_STACK* my_stack, int num_threads, int th_id, HISTORY& h)
+{
+	tl_id = th_id;
+	for (int i = 0; i < NUM_TEST / num_threads; i++) {
+		if ((rand() % 2) || i < 128 / num_threads) {
+			h.push_values.push_back(i);
+			stack_size++;
+			my_stack->PUSH(i);
+		}
+		else {
+			stack_size--;
+			int res = my_stack->POP();
+			if (res == -2) {
+				stack_size++;
+				if (stack_size > num_threads) {
+					cout << "ERROR Non_Empty Stack Returned NULL\n";
+					exit(-1);
+				}
+			}
+			else h.pop_values.push_back(res);
+		}
+	}
+}
+
+void check_history(MY_STACK& my_stack, vector <HISTORY>& h)
+{
+	unordered_multiset <int> pushed, poped, in_stack;
+
+	for (auto& v : h)
+	{
+		for (auto num : v.push_values) pushed.insert(num);
+		for (auto num : v.pop_values) poped.insert(num);
+		while (true) {
+			int num = my_stack.POP();
+			if (num == -2) break;
+			poped.insert(num);
+		}
+	}
+	for (auto num : pushed) {
+		if (poped.count(num) < pushed.count(num)) {
+			cout << "Pushed Number " << num << " does not exists in the STACK.\n";
+			exit(-1);
+		}
+		if (poped.count(num) > pushed.count(num)) {
+			cout << "Pushed Number " << num << " is poped more than " << poped.count(num) - pushed.count(num) << " times.\n";
+			exit(-1);
+		}
+	}
+	for (auto num : poped)
+		if (pushed.count(num) == 0) {
+			std::multiset <int> sorted;
+			for (auto num : poped)
+				sorted.insert(num);
+			cout << "There was elements in the STACK no one pushed : ";
+			int count = 20;
+			for (auto num : sorted)
+				cout << num << ", ";
+			cout << endl;
+			exit(-1);
+
+		}
+	cout << "NO ERROR detectd.\n";
+}
+
 int main()
 {
-	cout << "======== SPEED CHECK =============\n";
-
-	for (int i = 1; i <= MAX_THREADS; i *= 2)
-	{
-		MY_STACK myStack;
-
-		vector<thread> threads;
+	cout << "======== Error Checking =========\n";
+	for (int num_threads = 1; num_threads <= MAX_THREADS; num_threads *= 2) {
+		vector <thread> threads;
+		vector <HISTORY> log(num_threads);
+		MY_STACK my_stack;
+		stack_size = 0;
 		auto start_t = high_resolution_clock::now();
-
-		for (int j = 0; j < i; ++j)
-			threads.emplace_back(Worker, &myStack, i, j);
-
-		for (thread& t : threads)
-			t.join();
-
+		for (int i = 0; i < num_threads; ++i)
+			threads.emplace_back(worker_check, &my_stack, num_threads, i, std::ref(log[i]));
+		for (auto& th : threads)
+			th.join();
 		auto end_t = high_resolution_clock::now();
 		auto exec_t = end_t - start_t;
-
-		myStack.PrintTwenty();
-		myStack.Init();
-
-		printf("THREAD_NUM = %d\n", i);
-		printf("EXEC TIME = %lld msec\n", duration_cast<milliseconds>(exec_t).count());
-		printf("\n");
+		auto exec_ms = duration_cast<milliseconds>(exec_t).count();
+		my_stack.PrintTwenty();
+		cout << num_threads << " Threads.  Exec Time : " << exec_ms << endl;
+		check_history(my_stack, log);
 	}
 
-	return 0;
+	cout << "======== BENCHMARKING =========\n";
+	for (int num_threads = 1; num_threads <= MAX_THREADS; num_threads *= 2) {
+		vector <thread> threads;
+		MY_STACK my_stack;
+		auto start_t = high_resolution_clock::now();
+		for (int i = 0; i < num_threads; ++i)
+			threads.emplace_back(worker, &my_stack, num_threads, i);
+		for (auto& th : threads)
+			th.join();
+		auto end_t = high_resolution_clock::now();
+		auto exec_t = end_t - start_t;
+		auto exec_ms = duration_cast<milliseconds>(exec_t).count();
+		my_stack.PrintTwenty();
+		cout << num_threads << " Threads.  Exec Time : " << exec_ms << endl;
+	}
 }
