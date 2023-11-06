@@ -54,5 +54,8 @@
     <ClCompile Include="QUEUEU.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="STACK.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

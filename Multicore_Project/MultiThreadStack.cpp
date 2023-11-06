@@ -136,7 +136,7 @@ public:
 
 		if (STATUS_MASK & v != ST_EMPTY) {
 			cout << "Value is too big!!\n";
-			return;
+			exit(-1);
 		}
 
 		int loop_counter = 0;
@@ -211,6 +211,7 @@ public:
 			CAS(old_range, old_range - 1);
 		if ((ret == -3) && (old_range < MAX_THREADS / 2))
 			CAS(old_range, old_range + 1); // WAIT TOO BUSY
+
 		return ret;
 	}
 };
@@ -413,6 +414,86 @@ public:
 		);
 	}
 };
+class LFELSTACK {
+	EliminationArray el;
+	NODE* volatile top;
+public:
+	LFELSTACK()
+	{
+		top = nullptr;
+	}
+	~LFELSTACK() { }
+	void PUSH(int x)
+	{
+		NODE* e = new NODE(x);
+
+		while (1) {
+			e->next = top;
+
+			if (CAS(&top, e->next, e)) {
+				return;
+			}
+
+			int ret = el.Visit(x);
+			if (ret == -1)
+			{
+				delete e;
+				return;
+			}
+		}
+	}
+	int POP()
+	{
+		while (1) {
+			NODE* ptr = top;
+
+			if (ptr == nullptr)
+				return -2;
+
+			if (CAS(&top, ptr, ptr->next))
+			{
+				return ptr->key;
+			}
+
+			int ret = el.Visit(-1);
+			if (ret != -1)
+			{
+				return ret;
+			}
+		}
+	}
+
+	void PrintTwenty() {
+		NODE* p = top;
+		int count = 0;
+		for (int i = 0; i < 20; ++i)
+		{
+			if (p == nullptr) break;
+			cout << p->key << " ";
+			p = p->next;
+		}
+		cout << endl;
+	}
+	void Init()
+	{
+		NODE* p = top;
+		while (p != nullptr)
+		{
+			NODE* t = p;
+			p = p->next;
+			delete t;
+		}
+		top = nullptr;
+	}
+	bool CAS(NODE* volatile* addr, NODE* oldNode, NODE* newNode)
+	{
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_llong*>(addr),
+			reinterpret_cast<long long*>(&oldNode),
+			reinterpret_cast<long long>(newNode)
+		);
+	}
+};
 
 thread_local int tl_id;
 int Thread_id()
@@ -420,7 +501,7 @@ int Thread_id()
 	return tl_id;
 }
 
-typedef LFBOSTACK MY_STACK;
+typedef LFELSTACK MY_STACK;
 
 void worker(MY_STACK* my_stack, int threadNum, int th_id)
 {
