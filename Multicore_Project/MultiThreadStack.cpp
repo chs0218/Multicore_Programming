@@ -53,6 +53,15 @@ Stack을 사용하지 않아야하니 별도의 다른 객체가 필요하다.
 교환을 시도하고 실패할경우 Stack에 접근
 교환자가 많으면 많을수록 서로 만나지 못할 가능성이 크다.
 
+교환자에서 ABA 문제가 일어나지만, 교환대상이 바뀐 것 뿐이고 값도 그대로이기 때문에 아무런 문제가 없다.
+너무 짧은 교환 시간을 할당하면 항상 실패하게 되므로 시간제한 기간을 잘 정해야한다.
+
+부하 상태에 따라서 교환자 개수가 달라지게 해보자.
+=> 소거 배열
+
+
+
+
 
 */
 
@@ -178,6 +187,31 @@ public:
 				exit(-1);
 			}
 		}
+	}
+};
+class EliminationArray {
+	volatile int range;
+	EXCHANGER exchanger[MAX_THREADS];
+public:
+	EliminationArray() { range = 1; }
+	~EliminationArray() {}
+	bool CAS(int old_v, int new_v) {
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_int*>(&range),
+			&old_v,
+			new_v
+		);
+	}
+	int Visit(int value) {
+		int old_range = range;
+		int slot = rand() % range;
+		int ret = exchanger[slot].exchange(value);
+
+		if ((ret == -2) && (old_range > 1)) // WAIT TIME OUT
+			CAS(old_range, old_range - 1);
+		if ((ret == -3) && (old_range < MAX_THREADS / 2))
+			CAS(old_range, old_range + 1); // WAIT TOO BUSY
+		return ret;
 	}
 };
 
