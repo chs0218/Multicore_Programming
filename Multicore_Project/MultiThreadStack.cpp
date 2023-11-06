@@ -23,6 +23,37 @@ Thread마다 기간은 다르게 해야한다.
 
 RDTSC => Read Time Stack Counter(값이 eax에들어가고) 
 mov start, eax (start에 저장)
+
+하지만 RDTSC는 CPU 성능이 아닌 CPU 클락 속도에 비례한다.
+또한 루프에서 메모리를 아예 접근하지 않는 것이 바람직한다.
+
+어셈블리로 작성해 링크를 해야한다? << 나중에 알아보자.
+
+하지만 Lock Free 알고리즘은 오버헤드가 적고 코어가 많지 않기 때문에 BackOff의 장점이 잘 보이진 않는다.
+하지만 코어 개수가 많거나, BackOff 충돌 오버헤드가 클경우 BackOff로 인한 성능 향상이 높을 수 있다.
+
+소거?
+Queue나 Stack은 리스트의 말단 부분에서 잦은 충돌이 생긴다!!
+세밀한 동기화 타입의 최적화가 불가능하다..(쓰레드가 많아질수록 성능 향상이 X)
+Queue는 충돌이 분산되지만 Stack은? ㅠ
+
+어쩔수 없는가? 그렇진 않다!!
+만능 알고리즘은 Stack도 코어가 많아질수록 성능이 향상된다.
+그럼 어떤 방법을 사용해야하는가
+
+소거!! (충돌을 소거한다)
+아이디어: Stack에서 충돌이 필수인가?
+Push와 Pop이 동시에 발생하는 경우, Stack을 안건들이고도 할 수 있지 않는가?
+Stack에 넣지 않고 직접 Data를 주고 받도록 한다???
+이때, Lock Free로 주고 받아야한다.
+Stack을 사용하지 않아야하니 별도의 다른 객체가 필요하다.
+높은 경쟁률에 대비해 별도의 객체는 여러개를 준비한다.
+
+별도의 교환객체
+교환을 시도하고 실패할경우 Stack에 접근
+교환자가 많으면 많을수록 서로 만나지 못할 가능성이 크다.
+
+
 */
 
 #include <iostream>
@@ -42,6 +73,13 @@ constexpr int MAX_THREADS = 32;
 constexpr int NUM_TEST = 1000'0000;
 
 atomic_int stack_size = 0;
+
+#define ST_EMPTY	0x00000000
+#define ST_WAITING	0x40000000
+#define ST_BUSY		0x80000000
+#define VALUE_MASK	0x3FFFFFFF
+#define STATUS_MASK 0xC0000000
+constexpr int LOOP_LIMIT = 1000;
 
 class NODE {
 public:
@@ -71,6 +109,75 @@ public:
 	}
 	void reduce() {
 		limit /= 2;
+	}
+};
+class EXCHANGER {
+	volatile unsigned int slot;
+public:
+	EXCHANGER() : slot(ST_EMPTY) {}
+	bool CAS(unsigned old_slot, unsigned new_status, unsigned new_value){
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_uint*>(&slot), &old_slot, new_status | new_value
+		);
+	}
+	int exchange(int v) {
+		if (v == -1) {
+			v = v & VALUE_MASK;
+		}
+
+		if (STATUS_MASK & v != ST_EMPTY) {
+			cout << "Value is too big!!\n";
+			return;
+		}
+
+		int loop_counter = 0;
+		while (true) {
+			if (LOOP_LIMIT < loop_counter++)
+				return -3;	// 교환 실패, 충돌이 너무 심하다
+
+			unsigned curr = slot;
+			unsigned status = curr & STATUS_MASK;
+			unsigned value = curr & VALUE_MASK;
+			switch (status) {
+			case ST_EMPTY:
+				if (CAS(curr, ST_WAITING, v)) {
+					int count = 0;
+					while (STATUS_MASK & slot == ST_WAITING) {
+						if (LOOP_LIMIT < count++) {
+							if(CAS(ST_WAITING | v, status, value))
+								return -2;	// 교환 실패, 교환 상대가 없다.
+							else {
+								break;
+							}
+						}
+					}
+					unsigned ret = VALUE_MASK & slot;
+					slot = ST_EMPTY;
+					if (ret == VALUE_MASK)
+						return -1;
+					return ret;
+				}
+				else {
+					continue;
+				}
+				break;
+			case ST_WAITING:
+				if (CAS(curr, ST_BUSY, v)) {
+					if (value == VALUE_MASK)
+						value = -1;
+					return value;
+				}
+				else {
+					continue;
+				}
+				break;
+			case ST_BUSY:
+				continue;
+			default:
+				cout << "Unknown Status Error\n";
+				exit(-1);
+			}
+		}
 	}
 };
 
