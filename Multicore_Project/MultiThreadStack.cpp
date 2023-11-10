@@ -58,11 +58,6 @@ Stack을 사용하지 않아야하니 별도의 다른 객체가 필요하다.
 
 부하 상태에 따라서 교환자 개수가 달라지게 해보자.
 => 소거 배열
-
-
-
-
-
 */
 
 #include <iostream>
@@ -122,64 +117,62 @@ public:
 };
 class EXCHANGER {
 	volatile unsigned int slot;
+	bool CAS(unsigned old_slot, unsigned new_status, unsigned new_value)
+	{
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_uint*>(&slot),
+			&old_slot, new_status | new_value);
+	}
 public:
 	EXCHANGER() : slot(ST_EMPTY) {}
-	bool CAS(unsigned old_slot, unsigned new_status, unsigned new_value){
-		return atomic_compare_exchange_strong(
-			reinterpret_cast<volatile atomic_uint*>(&slot), &old_slot, new_status | new_value
-		);
-	}
-	int exchange(int v) {
-		if (v == -1) {
+	int exchange(int v)
+	{
+		if (-1 == v)
 			v = v & VALUE_MASK;
-		}
-
-		if (STATUS_MASK & v != ST_EMPTY) {
-			cout << "Value is too big!!\n";
+		if ((STATUS_MASK & v) != ST_EMPTY) {
+			cout << "Value is too big!\n";
 			exit(-1);
 		}
-
 		int loop_counter = 0;
 		while (true) {
-			if (LOOP_LIMIT < loop_counter++)
-				return -3;	// 교환 실패, 충돌이 너무 심하다
-
+			if (LOOP_LIMIT < loop_counter++) {
+				return -3;		// 교환 실패, 충돌이 너무 심함.
+			}
 			unsigned curr = slot;
 			unsigned status = curr & STATUS_MASK;
 			unsigned value = curr & VALUE_MASK;
 			switch (status) {
 			case ST_EMPTY:
-				if (CAS(curr, ST_WAITING, v)) {
+				if (true == CAS(curr, ST_WAITING, v)) {
 					int count = 0;
-					while (STATUS_MASK & slot == ST_WAITING) {
+					while ((STATUS_MASK & slot) == ST_WAITING) {
 						if (LOOP_LIMIT < count++) {
-							if(CAS(ST_WAITING | v, status, value))
-								return -2;	// 교환 실패, 교환 상대가 없다.
+							if (true == CAS(ST_WAITING | v, status, value))
+								return -2;		// 교환 실패, 상대가 없어서.
 							else {
-								break;
+								unsigned ret = VALUE_MASK & slot;
+								slot = ST_EMPTY;
+								if (ret == VALUE_MASK)
+									ret = -1;
+								return ret;
 							}
 						}
 					}
 					unsigned ret = VALUE_MASK & slot;
 					slot = ST_EMPTY;
 					if (ret == VALUE_MASK)
-						return -1;
+						ret = -1;
 					return ret;
 				}
-				else {
+				else
 					continue;
-				}
-				break;
 			case ST_WAITING:
-				if (CAS(curr, ST_BUSY, v)) {
+				if (true == CAS(curr, ST_BUSY, v)) {
 					if (value == VALUE_MASK)
 						value = -1;
 					return value;
 				}
-				else {
-					continue;
-				}
-				break;
+				continue;
 			case ST_BUSY:
 				continue;
 			default:
@@ -188,30 +181,28 @@ public:
 			}
 		}
 	}
+
 };
 class EliminationArray {
 	volatile int range;
 	EXCHANGER exchanger[MAX_THREADS];
+	bool CAS(int old_v, int new_v)
+	{
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_int*>(&range),
+			&old_v, new_v);
+	}
 public:
 	EliminationArray() { range = 1; }
 	~EliminationArray() {}
-	bool CAS(int old_v, int new_v) {
-		return atomic_compare_exchange_strong(
-			reinterpret_cast<volatile atomic_int*>(&range),
-			&old_v,
-			new_v
-		);
-	}
 	int Visit(int value) {
 		int old_range = range;
-		int slot = rand() % range;
+		int slot = rand() % old_range;
 		int ret = exchanger[slot].exchange(value);
-
-		if ((ret == -2) && (old_range > 1)) // WAIT TIME OUT
+		if ((ret == -2) && (old_range > 1))  // WAIT TIME OUT
 			CAS(old_range, old_range - 1);
-		if ((ret == -3) && (old_range < MAX_THREADS / 2))
-			CAS(old_range, old_range + 1); // WAIT TOO BUSY
-
+		if ((ret == -3) && (old_range < MAX_THREADS / 2)) // BUSY TIME OUT
+			CAS(old_range, old_range + 1); // MAX RANGE is # of thread / 2
 		return ret;
 	}
 };
@@ -415,83 +406,78 @@ public:
 	}
 };
 class LFELSTACK {
+	volatile int el_num;
 	EliminationArray el;
 	NODE* volatile top;
 public:
-	LFELSTACK()
+	LFELSTACK() : top(nullptr) { }
+	bool CAS(NODE* volatile* addr, NODE* old_p, NODE* new_p)
 	{
-		top = nullptr;
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_llong*>(addr),
+			reinterpret_cast<long long*>(&old_p),
+			reinterpret_cast<long long>(new_p));
 	}
-	~LFELSTACK() { }
 	void PUSH(int x)
 	{
-		NODE* e = new NODE(x);
-
-		while (1) {
-			e->next = top;
-
-			if (CAS(&top, e->next, e)) {
+		NODE* e = new NODE{ x };
+		while (true) {
+			NODE* first = top;
+			e->next = first;
+			if (true == CAS(&top, first, e)) {
 				return;
 			}
 
 			int ret = el.Visit(x);
+
 			if (ret == -1)
 			{
+				++el_num;
 				delete e;
 				return;
 			}
 		}
 	}
+
 	int POP()
 	{
-		while (1) {
-			NODE* ptr = top;
-
-			if (ptr == nullptr)
-				return -2;
-
-			if (CAS(&top, ptr, ptr->next))
-			{
-				return ptr->key;
+		while (true) {
+			NODE* first = top;
+			if (nullptr == first) return -2;
+			int temp = first->key;
+			NODE* next = first->next;
+			if (true == CAS(&top, first, next)) {
+				return temp;
 			}
 
 			int ret = el.Visit(-1);
-			if (ret != -1)
-			{
+
+			if (ret >= 0)
 				return ret;
-			}
 		}
 	}
 
-	void PrintTwenty() {
+	void PrintTwenty()
+	{
 		NODE* p = top;
-		int count = 0;
-		for (int i = 0; i < 20; ++i)
-		{
+		for (int i = 0; i < 20; ++i) {
 			if (p == nullptr) break;
-			cout << p->key << " ";
+			cout << p->key << ", ";
 			p = p->next;
 		}
 		cout << endl;
+		cout << "소거 횟수: " << el_num << endl;
 	}
+
 	void Init()
 	{
 		NODE* p = top;
-		while (p != nullptr)
-		{
+		while (p != nullptr) {
 			NODE* t = p;
 			p = p->next;
 			delete t;
 		}
 		top = nullptr;
-	}
-	bool CAS(NODE* volatile* addr, NODE* oldNode, NODE* newNode)
-	{
-		return atomic_compare_exchange_strong(
-			reinterpret_cast<volatile atomic_llong*>(addr),
-			reinterpret_cast<long long*>(&oldNode),
-			reinterpret_cast<long long>(newNode)
-		);
 	}
 };
 
