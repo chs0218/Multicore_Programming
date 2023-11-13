@@ -61,6 +61,8 @@ atomic 메모리의 합의 수가 1이라는 가정에 모순된다. 따라서 atomic 메모리로 Queue�
 
 curr->removed = true와 prev->next = curr->next의 순서가 바뀌면 링크에서 제외된 노드가 valid하다고 판단할 수 있다.
 함수 하나에서 atomic하게 한번에 메모리를 읽어와 작업해야한다.
+
+EBR, STP는 해보고 결정하는게 좋다. 뭐가 더 좋은지 해봐야 안다.
 */
 
 using namespace std;
