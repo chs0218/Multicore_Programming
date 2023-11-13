@@ -84,6 +84,7 @@ atomic_int stack_size = 0;
 #define VALUE_MASK	0x3FFFFFFF
 #define STATUS_MASK 0xC0000000
 constexpr int LOOP_LIMIT = 1000;
+atomic_int el_num;
 
 class NODE {
 public:
@@ -406,7 +407,6 @@ public:
 	}
 };
 class LFELSTACK {
-	volatile int el_num;
 	EliminationArray el;
 	NODE* volatile top;
 public:
@@ -466,7 +466,6 @@ public:
 			p = p->next;
 		}
 		cout << endl;
-		cout << "¼Ò°Å È½¼ö: " << el_num << endl;
 	}
 
 	void Init()
@@ -579,6 +578,7 @@ int main()
 		vector <HISTORY> log(num_threads);
 		MY_STACK my_stack;
 		stack_size = 0;
+		el_num = 0;
 		auto start_t = high_resolution_clock::now();
 		for (int i = 0; i < num_threads; ++i)
 			threads.emplace_back(worker_check, &my_stack, num_threads, i, std::ref(log[i]));
@@ -588,6 +588,7 @@ int main()
 		auto exec_t = end_t - start_t;
 		auto exec_ms = duration_cast<milliseconds>(exec_t).count();
 		my_stack.PrintTwenty();
+		cout << "¼Ò°Å È½¼ö: " << el_num << endl;
 		cout << num_threads << " Threads.  Exec Time : " << exec_ms << endl;
 		check_history(my_stack, log);
 	}
@@ -596,6 +597,7 @@ int main()
 	for (int num_threads = 1; num_threads <= MAX_THREADS; num_threads *= 2) {
 		vector <thread> threads;
 		MY_STACK my_stack;
+		el_num = 0;
 		auto start_t = high_resolution_clock::now();
 		for (int i = 0; i < num_threads; ++i)
 			threads.emplace_back(worker, &my_stack, num_threads, i);
@@ -605,6 +607,7 @@ int main()
 		auto exec_t = end_t - start_t;
 		auto exec_ms = duration_cast<milliseconds>(exec_t).count();
 		my_stack.PrintTwenty();
+		cout << "¼Ò°Å È½¼ö: " << el_num << endl;
 		cout << num_threads << " Threads.  Exec Time : " << exec_ms << endl;
 	}
 }
