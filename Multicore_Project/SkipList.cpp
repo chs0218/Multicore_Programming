@@ -17,6 +17,19 @@ SkipList
 - 이때, 레벨별로 검색 결과를 저장 (Add를 할 때, 추가되는 노드가 몇 층일지 모르기 때문)
 - 맨 아래 레벨에 도달할 경우 종료
 - 낮은 층에 노드가 더 많이 생기도록 구현
+
+성긴 동기화를 사용하다보니, 쓰레드 개수가 늘어날수록 실행속도가 떨어진다.
+병렬성을 고려한 스킵리스트를 구현해보자.
+
+게으른 동기화 방식의 스킵리스트를 구현
+- 노드의 추가했음의 기준을 고려해야한다. (코드 한줄만으로 노드가 추가되지 않고, 루프를 돈다.)
+- 모든 노드의 추가가 완료되었을 때, 노드가 추가되었다고 선언
+- removed와 마찬가지로 fullyLinked field를 추가해 확인한다.
+- 일반적으로는 locking한 쓰레드가 다시 locking을 하면 오류
+- recursive_mutex를 사용해 해결
+- find시에 fullyLinked가 아닌 노드를 찾았을 경우, 제대로 찾은게 아니다.
+
+
 */
 
 #include <iostream>
@@ -112,17 +125,119 @@ public:
 	int key;
 	SKNODE* volatile next[TOP_LEVEL + 1];
 	int top_level;
-	SKNODE() : key(-1), top_level(0){ 
+	volatile bool bRemoved;
+	volatile bool bFullyLinked;
+	recursive_mutex nlock;
+	SKNODE() : key(-1), top_level(0), bRemoved(false), bFullyLinked(false) { 
 		for (auto& n : next)
 			n = nullptr;
 	}
-	SKNODE(int key_value, int top) : key(key_value), top_level(top) {
+	SKNODE(int key_value, int top) : key(key_value), top_level(top), 
+		bRemoved(false), bFullyLinked(false) {
 		for (auto& n : next)
 			n = nullptr;
 	}
 	~SKNODE() {}
 };
 
+class CSET {
+	NODE head, tail;
+	mutex glock;
+public:
+	CSET()
+	{
+		head.key = numeric_limits<int>::min();
+		tail.key = numeric_limits<int>::max();
+		head.next = &tail;
+	}
+	~CSET() { Init(); }
+	void Init()
+	{
+		NODE* ptr;
+		while (head.next != &tail) {
+			ptr = head.next;
+			head.next = head.next->next;
+			delete ptr;
+		}
+	}
+	bool Add(int key)
+	{
+		NODE* prev, * curr;
+		prev = &head;
+		glock.lock();
+		curr = prev->next;
+		while (curr->key < key) {
+			prev = curr;
+			curr = curr->next;
+		}
+		if (key == curr->key) {
+			glock.unlock();
+			return false;
+		}
+		else {
+			NODE* node = new NODE(key);	// 이 또한 빼면 좋다
+			node->next = curr;
+			prev->next = node;
+			glock.unlock();
+			return true;
+		}
+	}
+	bool Remove(int key)
+	{
+		NODE* prev, * curr;
+		prev = &head;
+		glock.lock();
+		curr = prev->next;
+		while (curr->key < key) {
+			prev = curr;
+			curr = curr->next;
+		}
+		if (key == curr->key) {
+			prev->next = curr->next;
+			glock.unlock();
+			delete curr;	// Unlock()을 한 뒤에 delete하는 편이 좋다. delete 명령의 운영체제의 호출때문
+			return true;
+		}
+		else {
+			glock.unlock();
+			return false;
+		}
+
+	}
+	bool Contains(int key)
+	{
+		NODE* prev, * curr;
+		prev = &head;
+		glock.lock();
+		curr = prev->next;
+		while (curr->key < key) {
+			prev = curr;
+			curr = curr->next;
+		}
+		if (key == curr->key) {
+			glock.unlock();
+			return true;
+		}
+		else {
+			glock.unlock();
+			return false;
+		}
+	}
+	void PrintTwenty() {
+		NODE* prev, * curr;
+		prev = &head;
+		curr = prev->next;
+		int count = 0;
+
+		while (count < 20) {
+			cout << curr->key << ", ";
+			prev = curr;
+			curr = curr->next;
+			++count;
+		}
+		cout << endl;
+	}
+};
 class LFSET {
 	LFNODE head, tail;
 public:
@@ -342,10 +457,171 @@ public:
 		cout << endl;
 	}
 };
+class L_SKSET {
+	SKNODE head{ numeric_limits<int>::min(), TOP_LEVEL };
+	SKNODE tail{ numeric_limits<int>::max(), TOP_LEVEL };
+public:
+	L_SKSET()
+	{
+		for (auto& n : head.next)
+			n = &tail;
 
-C_SKSET mySet;
+		head.bFullyLinked = tail.bFullyLinked = true;
+	}
+	~L_SKSET() { Init(); }
+	void Init()
+	{
+		SKNODE* ptr = head.next[0];
+		while (ptr != &tail) {
+			SKNODE* t = ptr;
+			ptr = ptr->next[0];
+			delete t;
+		}
 
-typedef C_SKSET MY_SET;
+		for (auto& n : head.next)
+			n = &tail;
+	}
+	int Find(int key, SKNODE* prev[], SKNODE* curr[])
+	{
+		int nFindLevel = -1;
+		for (int cl = TOP_LEVEL; cl >= 0; --cl) {
+			if (cl == TOP_LEVEL)
+				prev[cl] = &head;
+			else
+				prev[cl] = prev[cl + 1];
+			curr[cl] = prev[cl]->next[cl];
+			while (curr[cl]->key < key) {
+				prev[cl] = curr[cl];
+				curr[cl] = curr[cl]->next[cl];
+			}
+			if ((curr[cl]->key == key) && (nFindLevel == -1))
+				nFindLevel = cl;
+		}
+		return nFindLevel;
+	}
+	bool Add(int key)
+	{
+		int nLevel = 0;
+		for (nLevel = 0; nLevel < TOP_LEVEL; ++nLevel)
+			if (rand() % 2 == 1) break;
+
+		SKNODE* node = new SKNODE(key, nLevel);
+
+		SKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
+		while (1)
+		{
+			Find(key, prev, curr);
+			if (key == curr[0]->key) {
+				if (!curr[0]->bRemoved) {
+					while (!curr[0]->bFullyLinked) {}
+					return false;
+				}
+				continue;
+			}
+
+			bool invalid = false;
+			int nLockedTop = 0;
+			for (int i = 0; i <= nLevel; ++i) {
+				prev[i]->nlock.lock();
+				if ((prev[i]->bRemoved == true) ||
+					(curr[i]->bRemoved == true) ||
+					(prev[i]->next[i] != curr[i])) {
+					nLockedTop = i;
+					invalid = true;
+					break;
+				}
+			}
+
+			if (invalid) {
+				for (int i = 0; i <= nLockedTop; ++i)
+					prev[i]->nlock.unlock();
+				continue;
+			}
+
+			for (int i = 0; i <= nLevel; ++i)
+			{
+				node->next[i] = curr[i];
+				prev[i]->next[i] = node;
+			}
+
+			node->bFullyLinked = true;
+
+			for (int i = 0; i <= nLevel; ++i)
+				prev[i]->nlock.unlock();
+			return true;
+		}
+	}
+	bool Remove(int key)
+	{
+		SKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
+		
+		int nLevel = Find(key, prev, curr);
+		if (nLevel == -1) return false;
+
+		SKNODE* victim = curr[nLevel];
+		if (victim->bFullyLinked == false) return false;
+		if (victim->bRemoved == true) return false;
+		if (victim->top_level != nLevel) return false;
+
+		victim->nlock.lock();
+		if (victim->bRemoved) {
+			victim->nlock.unlock();
+			return false;
+		}
+		else {
+			victim->bRemoved = true;
+		}
+
+		int top_level = victim->top_level;
+
+		while (true) {
+			bool invalid = false;
+			int nLockedTop = 0;
+			for (int i = 0; i <= top_level; ++i) {
+				prev[i]->nlock.lock();
+				if ((prev[i]->bRemoved == true) || (prev[i]->next[i] != victim)) {
+					invalid = true;
+					nLockedTop = i;
+					break;
+				}
+			}
+			if (true == invalid) {
+				for (int i = 0; i <= nLockedTop; ++i)
+					prev[i]->nlock.unlock();
+				continue;
+			}
+			for (int i = nLevel; i >= 0; --i)
+				prev[i]->next[i] = victim->next[i];
+			for (int i = nLevel; i >= 0; --i)
+				prev[i]->nlock.unlock();
+			victim->nlock.unlock();
+			return true;
+		}
+	}
+	bool Contains(int key)
+	{
+		SKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
+		int nLevel = Find(key, prev, curr);
+		if (nLevel == -1) return false;
+
+		SKNODE* target = curr[nLevel];
+		return (true == target->bFullyLinked &&
+			false == target->bRemoved);
+	}
+	void PrintTwenty() {
+		SKNODE* p = head.next[0];
+		for (int i = 0; i < 20; ++i) {
+			if (p == &tail) break;
+			cout << p->key << ", ";
+			p = p->next[0];
+		}
+		cout << endl;
+	}
+};
+
+typedef L_SKSET MY_SET;
+
+MY_SET mySet;
 
 class HISTORY {
 public:
