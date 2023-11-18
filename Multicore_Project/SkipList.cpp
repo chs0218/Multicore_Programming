@@ -45,7 +45,7 @@ using namespace chrono;
 
 constexpr int TOP_LEVEL = 9;
 constexpr int MAX_THREADS = 32;
-constexpr int NUM_TEST = 400'0000;
+constexpr int NUM_TEST = 1000'0000;
 constexpr int KEY_RANGE = 1000;
 
 class my_mutex
@@ -552,7 +552,7 @@ public:
 		}
 	}
 	bool Remove(int key)
-	{
+	{	
 		SKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
 		
 		int nLevel = Find(key, prev, curr);
@@ -568,10 +568,9 @@ public:
 			victim->nlock.unlock();
 			return false;
 		}
-		else {
-			victim->bRemoved = true;
-		}
-
+		
+		victim->bRemoved = true;
+		
 		int top_level = victim->top_level;
 
 		while (true) {
@@ -585,9 +584,10 @@ public:
 					break;
 				}
 			}
-			if (true == invalid) {
+			if (invalid) {
 				for (int i = 0; i <= nLockedTop; ++i)
 					prev[i]->nlock.unlock();
+				nLevel = Find(key, prev, curr);
 				continue;
 			}
 			for (int i = nLevel; i >= 0; --i)
