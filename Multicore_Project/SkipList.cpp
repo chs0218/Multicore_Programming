@@ -29,7 +29,15 @@ SkipList
 - recursive_mutex를 사용해 해결
 - find시에 fullyLinked가 아닌 노드를 찾았을 경우, 제대로 찾은게 아니다.
 
+mutex에는 Convoying이 일어나지 않지만 fully_linked를 확인하기 위해 기다리는 코드로 인해
+Convoying이 일어나 실행속도가 저하 될 수 있다.(논리 코어보다 쓰레드가 더 많이 생성될 경우)
 
+LockFreeSkipList에서는 동시 CAS를 위해 합성 포인터를 사용한다.
+모든 레벨의 next에 마킹을 한다. 윗 레벨에서도 검색을 하면서 삭제를 하기 위해.
+Find()는 리스트를 순회하면서 마킹된 노드를 만날 때마다 잘라내어 
+마킹된 노드가 검색 결과에 포함되지 않게 한다.
+0층이 연결되었을 때, 추가되었다고 정의
+=> 0층부터 연결을 시작한다.	
 */
 
 #include <iostream>
@@ -43,9 +51,9 @@ SkipList
 using namespace std;
 using namespace chrono;
 
-constexpr int TOP_LEVEL = 9;
+constexpr int TOP_LEVEL = 10;
 constexpr int MAX_THREADS = 32;
-constexpr int NUM_TEST = 1000'0000;
+constexpr int NUM_TEST = 4000000;
 constexpr int KEY_RANGE = 1000;
 
 class my_mutex
@@ -138,6 +146,46 @@ public:
 			n = nullptr;
 	}
 	~SKNODE() {}
+};
+class LFSKNODE {
+	LFSKNODE* volatile next[TOP_LEVEL + 1];
+public:
+	int key;
+	int top_level;
+	LFSKNODE() : key(-1), top_level(0) {
+		for (auto& n : next)
+			n = nullptr;
+	}
+	LFSKNODE(int key_value, int top) : key(key_value), top_level(top) {
+		for (auto& n : next)
+			n = nullptr;
+	}
+	void Set(int level, LFSKNODE* ptr, bool bRemoved) {
+		long long temp = reinterpret_cast<long long>(ptr);
+		if (bRemoved) temp = temp | 1;
+		next[level] = reinterpret_cast<LFSKNODE*>(temp);
+	}
+	LFSKNODE* Get(int level, bool* bRemoved) {
+		long long temp = reinterpret_cast<long long>(next[level]);
+		*bRemoved = ((temp & 1) == 1);
+		return reinterpret_cast<LFSKNODE*>(temp & ADDR_MASK);
+	}
+	LFSKNODE* Get(int level) {
+		long long temp = reinterpret_cast<long long>(next[level]);
+		return reinterpret_cast<LFSKNODE*>(temp & ADDR_MASK);
+	}
+	bool CAS(int level, LFSKNODE* old_ptr, LFSKNODE* new_ptr, 
+		bool old_removed, bool new_removed) {
+		long long old_value = reinterpret_cast<long long>(old_ptr);
+		if (old_removed) old_value = old_value | 1;
+		long long new_value = reinterpret_cast<long long>(new_ptr);
+		if (new_removed) new_value = new_value | 1;
+		return atomic_compare_exchange_strong(
+			reinterpret_cast<volatile atomic_llong*>(&next[level]),
+			&old_value,
+			new_value);
+	}
+	~LFSKNODE() {}
 };
 
 class CSET {
@@ -614,6 +662,161 @@ public:
 			if (p == &tail) break;
 			cout << p->key << ", ";
 			p = p->next[0];
+		}
+		cout << endl;
+	}
+};
+class LF_SKSET {
+	LFSKNODE head{ numeric_limits<int>::min(), TOP_LEVEL };
+	LFSKNODE tail{ numeric_limits<int>::max(), TOP_LEVEL };
+public:
+	LF_SKSET()
+	{
+		for (int i = 0; i <= TOP_LEVEL; ++i) {
+			head.Set(i, &tail, false);
+		}
+	}
+	~LF_SKSET() { Init(); }
+	void Init()
+	{
+		LFSKNODE* ptr = head.Get(0);
+		while (ptr != &tail) {
+			LFSKNODE* t = ptr;
+			ptr = ptr->Get(0);
+			delete t;
+		}
+
+		for (int i = 0; i <= TOP_LEVEL; ++i) {
+			head.Set(i, &tail, false);
+		}
+	}
+	bool Find(int key, LFSKNODE* prev[], LFSKNODE* curr[])
+	{
+		retry:
+		prev[TOP_LEVEL] = &head;
+		for (int cl = TOP_LEVEL; cl >= 0; --cl) {
+			if (cl != TOP_LEVEL)
+				prev[cl] = prev[cl + 1];
+
+			while (1) {
+				curr[cl] = prev[cl]->Get(cl);
+
+				bool removed = false;
+				LFSKNODE* succ = curr[cl]->Get(cl, &removed);
+
+				while (removed) {
+					if (false == prev[cl]->CAS(cl, curr[cl], succ, false, false))
+						goto retry;
+					curr[cl] = succ;
+					succ = curr[cl]->Get(cl, &removed);
+				}
+
+				if (curr[cl]->key >= key) break;
+			}
+		}
+		return curr[0]->key == key;
+	}
+	bool Add(int key)
+	{
+		int nLevel = 0;
+		for (nLevel = 0; nLevel < TOP_LEVEL; ++nLevel)
+			if (rand() % 2 == 1) break;
+
+		SKNODE* node = new SKNODE(key, nLevel);
+
+		SKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
+		while (1)
+		{
+			Find(key, prev, curr);
+			if (key == curr[0]->key) {
+				if (!curr[0]->bRemoved) {
+					while (!curr[0]->bFullyLinked) {}
+					return false;
+				}
+				continue;
+			}
+
+			bool invalid = false;
+			int nLockedTop = 0;
+			for (int i = 0; i <= nLevel; ++i) {
+				prev[i]->nlock.lock();
+				if ((prev[i]->bRemoved == true) ||
+					(curr[i]->bRemoved == true) ||
+					(prev[i]->next[i] != curr[i])) {
+					nLockedTop = i;
+					invalid = true;
+					break;
+				}
+			}
+
+			if (invalid) {
+				for (int i = 0; i <= nLockedTop; ++i)
+					prev[i]->nlock.unlock();
+				continue;
+			}
+
+			for (int i = 0; i <= nLevel; ++i)
+			{
+				node->next[i] = curr[i];
+				prev[i]->next[i] = node;
+			}
+
+			node->bFullyLinked = true;
+
+			for (int i = 0; i <= nLevel; ++i)
+				prev[i]->nlock.unlock();
+			return true;
+		}
+	}
+	bool Remove(int key)
+	{
+		LFSKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
+
+		if(false == Find(key, prev, curr)) return false;
+
+		int top_level = curr[0]->top_level;
+		LFSKNODE* r_node = curr[0];
+		for (int i = TOP_LEVEL; i > 0; --i) {
+			bool removed = false;
+			LFSKNODE* succ = r_node->Get(i, &removed);
+			while (false == removed) {
+				//여기하던중
+				if (removed) break;
+
+				bool ret = r_node->CAS(i, succ, succ, false, true);
+				if (true == ret) break;
+			}
+		}
+
+		bool removed = false;
+		LFSKNODE* succ = r_node->Get(0, &removed);
+
+		while (1) {
+			bool ret = r_node->CAS(0, succ, succ, false, true);
+			succ = r_node->Get(0, &removed);
+			if (ret) {
+				Find(key, prev, curr);
+				return true;
+			}
+			else if (removed) return false;
+		}
+	}
+	bool Contains(int key)
+	{
+		SKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
+		int nLevel = Find(key, prev, curr);
+		if (nLevel == -1) return false;
+
+		SKNODE* target = curr[nLevel];
+		return (true == target->bFullyLinked &&
+			false == target->bRemoved);
+	}
+	void PrintTwenty() {
+		LFSKNODE* p = head.Get(0);
+		for (int i = 0; i < 20; ++i) {
+			if (p == &tail) break;
+			cout << p->key << ", ";
+			p = p->Get(0);
 		}
 		cout << endl;
 	}
