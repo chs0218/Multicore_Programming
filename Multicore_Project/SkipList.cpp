@@ -694,16 +694,15 @@ public:
 	{
 		retry:
 		prev[TOP_LEVEL] = &head;
+
+		bool removed = false;
 		for (int cl = TOP_LEVEL; cl >= 0; --cl) {
 			if (cl != TOP_LEVEL)
 				prev[cl] = prev[cl + 1];
+			curr[cl] = prev[cl]->Get(cl);
 
 			while (1) {
-				curr[cl] = prev[cl]->Get(cl);
-
-				bool removed = false;
 				LFSKNODE* succ = curr[cl]->Get(cl, &removed);
-
 				while (removed) {
 					if (false == prev[cl]->CAS(cl, curr[cl], succ, false, false))
 						goto retry;
@@ -711,7 +710,11 @@ public:
 					succ = curr[cl]->Get(cl, &removed);
 				}
 
-				if (curr[cl]->key >= key) break;
+				if (curr[cl]->key >= key)
+					break;
+
+				prev[cl] = curr[cl];
+				curr[cl] = curr[cl]->Get(cl);
 			}
 		}
 		return curr[0]->key == key;
@@ -722,50 +725,32 @@ public:
 		for (nLevel = 0; nLevel < TOP_LEVEL; ++nLevel)
 			if (rand() % 2 == 1) break;
 
-		SKNODE* node = new SKNODE(key, nLevel);
+		LFSKNODE* node = new LFSKNODE(key, nLevel);
+		LFSKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
 
-		SKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
 		while (1)
 		{
-			Find(key, prev, curr);
-			if (key == curr[0]->key) {
-				if (!curr[0]->bRemoved) {
-					while (!curr[0]->bFullyLinked) {}
-					return false;
+			bool ret = Find(key, prev, curr);
+
+			if (ret) return false;
+			else {
+				for (int i = 0; i <= nLevel; ++i) {
+					node->Set(i, curr[i], false);
 				}
-				continue;
-			}
 
-			bool invalid = false;
-			int nLockedTop = 0;
-			for (int i = 0; i <= nLevel; ++i) {
-				prev[i]->nlock.lock();
-				if ((prev[i]->bRemoved == true) ||
-					(curr[i]->bRemoved == true) ||
-					(prev[i]->next[i] != curr[i])) {
-					nLockedTop = i;
-					invalid = true;
-					break;
+				if (false == prev[0]->CAS(0, curr[0], node, false, false))
+					continue;
+
+				for (int i = 1; i <= nLevel; ++i) {
+					while (1) {
+						if (prev[i]->CAS(i, curr[i], node, false, false))
+							break;
+						Find(key, prev, curr);
+					}
 				}
+
+				return true;
 			}
-
-			if (invalid) {
-				for (int i = 0; i <= nLockedTop; ++i)
-					prev[i]->nlock.unlock();
-				continue;
-			}
-
-			for (int i = 0; i <= nLevel; ++i)
-			{
-				node->next[i] = curr[i];
-				prev[i]->next[i] = node;
-			}
-
-			node->bFullyLinked = true;
-
-			for (int i = 0; i <= nLevel; ++i)
-				prev[i]->nlock.unlock();
-			return true;
 		}
 	}
 	bool Remove(int key)
@@ -774,17 +759,14 @@ public:
 
 		if(false == Find(key, prev, curr)) return false;
 
-		int top_level = curr[0]->top_level;
 		LFSKNODE* r_node = curr[0];
-		for (int i = TOP_LEVEL; i > 0; --i) {
+		int top_level = curr[0]->top_level;
+		for (int i = top_level; i > 0; --i) {
 			bool removed = false;
 			LFSKNODE* succ = r_node->Get(i, &removed);
 			while (false == removed) {
-				//여기하던중
-				if (removed) break;
-
 				bool ret = r_node->CAS(i, succ, succ, false, true);
-				if (true == ret) break;
+				succ = r_node->Get(i, &removed);
 			}
 		}
 
@@ -803,13 +785,30 @@ public:
 	}
 	bool Contains(int key)
 	{
-		SKNODE* prev[TOP_LEVEL + 1], * curr[TOP_LEVEL + 1];
-		int nLevel = Find(key, prev, curr);
-		if (nLevel == -1) return false;
+		LFSKNODE* prev = &head;
+		LFSKNODE* curr = nullptr;
+		LFSKNODE* succ = nullptr;
 
-		SKNODE* target = curr[nLevel];
-		return (true == target->bFullyLinked &&
-			false == target->bRemoved);
+		for (int cl = TOP_LEVEL; cl >= 0; --cl) {
+			curr = prev->Get(cl);
+			while (1) {
+				bool removed;
+				succ = curr->Get(cl, &removed);
+				while (removed) {
+					curr = curr->Get(cl);
+					succ = curr->Get(cl, &removed);
+				}
+
+				if (curr->key < key) {
+					prev = curr;
+					curr = succ;
+				}
+				
+				else break;
+			}
+		}
+
+		return curr->key == key;
 	}
 	void PrintTwenty() {
 		LFSKNODE* p = head.Get(0);
@@ -822,7 +821,7 @@ public:
 	}
 };
 
-typedef L_SKSET MY_SET;
+typedef LF_SKSET MY_SET;
 
 MY_SET mySet;
 
