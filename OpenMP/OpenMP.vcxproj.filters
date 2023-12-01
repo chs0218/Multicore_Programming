@@ -15,7 +15,10 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="OpenMP.cpp">
+    <ClCompile Include="HelloOMP.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="MakeSum.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>
