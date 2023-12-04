@@ -4,6 +4,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <shared_mutex>
 #include <limits>
 /*
 Non Blocking 자료 구조를 제작해보자
@@ -212,7 +213,8 @@ using namespace std;
 using namespace chrono;
 
 constexpr int MAX_THREADS = 32;
-constexpr int NUM_TEST = 1000'0000;
+constexpr int NUM_TEST = 400'0000;
+constexpr int KEY_RANGE = 1000;
 
 class my_mutex
 {
@@ -532,6 +534,105 @@ public:
 		cout << endl;
 	}
 };
+class RW_SET {
+	NODE head, tail;
+	shared_mutex glock;
+public:
+	RW_SET()
+	{
+		head.key = numeric_limits<int>::min();
+		tail.key = numeric_limits<int>::max();
+		head.next = &tail;
+	}
+	~RW_SET() { Init(); }
+	void Init()
+	{
+		NODE* ptr;
+		while (head.next != &tail) {
+			ptr = head.next;
+			head.next = head.next->next;
+			delete ptr;
+		}
+	}
+	bool Add(int key)
+	{
+		NODE* prev, * curr;
+		prev = &head;
+		glock.lock();
+		curr = prev->next;
+		while (curr->key < key) {
+			prev = curr;
+			curr = curr->next;
+		}
+		if (key == curr->key) {
+			glock.unlock();
+			return false;
+		}
+		else {
+			NODE* node = new NODE(key);	// 이 또한 빼면 좋다
+			node->next = curr;
+			prev->next = node;
+			glock.unlock();
+			return true;
+		}
+	}
+	bool Remove(int key)
+	{
+		NODE* prev, * curr;
+		prev = &head;
+		glock.lock();
+		curr = prev->next;
+		while (curr->key < key) {
+			prev = curr;
+			curr = curr->next;
+		}
+		if (key == curr->key) {
+			prev->next = curr->next;
+			glock.unlock();
+			delete curr;
+			return true;
+		}
+		else {
+			glock.unlock();
+			return false;
+		}
+
+	}
+	bool Contains(int key)
+	{
+		NODE* prev, * curr;
+		prev = &head;
+		glock.lock_shared();
+		curr = prev->next;
+		while (curr->key < key) {
+			prev = curr;
+			curr = curr->next;
+		}
+		if (key == curr->key) {
+			glock.unlock_shared();
+			return true;
+		}
+		else {
+			glock.unlock_shared();
+			return false;
+		}
+	}
+	void PrintTwenty() {
+		NODE* prev, * curr;
+		prev = &head;
+		curr = prev->next;
+		int count = 0;
+
+		while (count < 20) {
+			cout << curr->key << ", ";
+			prev = curr;
+			curr = curr->next;
+			++count;
+		}
+		cout << endl;
+	}
+};
+
 class FSET {
 	NODE head, tail;
 public:
@@ -1530,12 +1631,7 @@ public:
 // Lock Free 버전의 게으른 동기화 구현
 // Eclass 파일을 찾지 못함;
 
-
-
-constexpr int MAX_THREADS = 32;
-constexpr int NUM_TEST = 4000000;
-constexpr int KEY_RANGE = 1000;
-LASPSET3 mySet;
+RW_SET mySet;
 
 class HISTORY {
 public:
@@ -1550,18 +1646,21 @@ void ThreadFunc(vector<HISTORY>* history, int num_thread)
 	int key;
 	for (int i = 0; i < NUM_TEST / num_thread; ++i)
 	{
-		switch (rand() % 3) {
-		case 0: key = rand() % KEY_RANGE;
+		switch (rand() % 100) {
+		case 0: 
+			key = rand() % KEY_RANGE;
 			mySet.Add(key);
 			break;
-		case 1: key = rand() % KEY_RANGE;
+		case 1: 
+			key = rand() % KEY_RANGE;
 			mySet.Remove(key);
 			break;
-		case 2: key = rand() % KEY_RANGE;
+		default:
+			key = rand() % KEY_RANGE;
 			mySet.Contains(key);
 			break;
-		default: cout << "Error\n";
-			exit(-1);
+		/*default: cout << "Error\n";
+			exit(-1);*/
 		}
 	}
 }
@@ -1634,7 +1733,7 @@ void Check_History(array <vector <HISTORY>, MAX_THREADS>& history, int num_threa
 
 int main()
 {
-	for (int i = 1; i <= MAX_THREADS; i *= 2)
+	/*for (int i = 1; i <= MAX_THREADS; i *= 2)
 	{
 		mySet.Init();
 
@@ -1656,7 +1755,7 @@ int main()
 		printf("EXEC TIME = %lld msec\n", duration_cast<milliseconds>(exec_t).count());
 		Check_History(history, i);
 		printf("\n");
-	}
+	}*/
 
 	cout << "======== SPEED CHECK =============\n";
 
