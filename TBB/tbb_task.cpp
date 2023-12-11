@@ -30,14 +30,14 @@ void mt_fibo(int n, int& res)
 
 int tbb_fibo(int n)
 {
-	if (n < 30)
+	if (n < 10)
 		return s_fibo(n);
 	else {
 		tbb::task_group tg;
 		int x, y;
 		tg.run([&x, n]() { x = tbb_fibo(n - 1); });
-		tg.run([&y, n]() { y = tbb_fibo(n - 2); });
-		tg.wait();
+		tg.run_and_wait([&y, n]() { y = tbb_fibo(n - 2); });
+		//tg.wait();
 		return x + y;
 	}
 }
